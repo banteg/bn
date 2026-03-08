@@ -33,10 +33,6 @@ class BridgeInstance:
     started_at: str | None
     meta: dict[str, Any]
 
-    @property
-    def label(self) -> str:
-        return f"{self.pid}:{self.plugin_version}"
-
 
 def _purge_stale_registry(registry_path: Path) -> None:
     with contextlib.suppress(OSError):
@@ -92,35 +88,11 @@ def list_instances() -> list[BridgeInstance]:
     return instances
 
 
-def choose_instance(
-    *,
-    instance_pid: int | None = None,
-    target: str | None = None,
-) -> BridgeInstance:
+def choose_instance() -> BridgeInstance:
     instances = list_instances()
     if not instances:
         raise BridgeError("No running Binary Ninja bridge instances found")
-
-    if target and target != "active":
-        try:
-            target_pid = int(target.split(":", 1)[0])
-        except ValueError:
-            target_pid = None
-        if target_pid is not None:
-            instance_pid = target_pid
-
-    if instance_pid is not None:
-        for instance in instances:
-            if instance.pid == instance_pid:
-                return instance
-        raise BridgeError(f"No running Binary Ninja bridge instance for pid {instance_pid}")
-
-    if len(instances) == 1:
-        return instances[0]
-
-    raise BridgeError(
-        "Multiple Binary Ninja bridge instances are running; pass --instance or prefix the target selector with PID:"
-    )
+    return instances[0]
 
 
 def send_request(
@@ -128,11 +100,10 @@ def send_request(
     *,
     params: dict[str, Any] | None = None,
     target: str | None = None,
-    instance_pid: int | None = None,
     timeout: float = 30.0,
     connect_retries: int = 4,
 ) -> dict[str, Any]:
-    instance = choose_instance(instance_pid=instance_pid, target=target)
+    instance = choose_instance()
     payload: dict[str, Any] = {
         "id": str(uuid.uuid4()),
         "op": op,

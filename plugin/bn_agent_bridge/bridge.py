@@ -8,7 +8,6 @@ import io
 import json
 import os
 import re
-import shutil
 import socketserver
 import threading
 import traceback
@@ -37,13 +36,6 @@ def _cache_home() -> Path:
     if base:
         return Path(base).expanduser()
     return Path.home() / "Library" / "Caches" / "bn"
-
-
-def _spill_dir() -> Path:
-    now = datetime.now(timezone.utc)
-    path = _cache_home() / "bridge-artifacts" / now.strftime("%Y%m%d")
-    path.mkdir(parents=True, exist_ok=True)
-    return path
 
 
 def _registry_path() -> Path:
@@ -229,36 +221,23 @@ class TargetManager:
                 continue
         return type(bv).__name__
 
-    def _selector_candidates(self, selector: str | None) -> list[str]:
-        if selector is None:
-            return []
-        text = str(selector).strip()
-        if not text:
-            return [""]
-
-        candidates = [text]
-        prefix, sep, tail = text.partition(":")
-        if sep and prefix.isdigit() and int(prefix) == os.getpid():
-            candidates.append(tail)
-        return candidates
-
     def _preferred_selector(self, record: TargetRecord, basename_counts: dict[str, int]) -> str:
         if record.basename and basename_counts.get(record.basename, 0) == 1:
             return record.basename
         return record.target_id()
 
     def _matches_record(self, record: TargetRecord, selector: str | None) -> bool:
-        for candidate in self._selector_candidates(selector):
-            if candidate in ("", "active"):
-                continue
-            if candidate in (
-                record.target_id(),
-                record.view_id,
-                record.filename,
-                record.basename,
-            ):
-                return True
-        return False
+        if selector is None:
+            return False
+        candidate = str(selector).strip()
+        if candidate in ("", "active"):
+            return False
+        return candidate in (
+            record.target_id(),
+            record.view_id,
+            record.filename,
+            record.basename,
+        )
 
     def _default_view(self):
         active = _active_binary_view()
@@ -338,8 +317,7 @@ class TargetManager:
         if not targets:
             raise RuntimeError("No BinaryView targets are open in the GUI")
 
-        selector_candidates = self._selector_candidates(selector)
-        if selector in (None, "", "active") or "active" in selector_candidates:
+        if selector in (None, "", "active"):
             active = self._default_view()
             if active is None:
                 raise RuntimeError("No active BinaryView is selected and multiple targets are open")

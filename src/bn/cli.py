@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .output import write_output
-from .paths import PLUGIN_NAME, plugin_install_dir, plugin_source_dir
-from .transport import BridgeError, choose_instance, list_instances, send_request
+from .paths import plugin_install_dir, plugin_source_dir
+from .transport import BridgeError, list_instances, send_request
 
 
 def _package_version() -> str:
@@ -29,11 +29,6 @@ def _common_io_options(parser: argparse.ArgumentParser) -> None:
         help="Output format",
     )
     parser.add_argument("--out", type=Path, help="Write output to a file instead of stdout")
-    parser.add_argument(
-        "--instance",
-        type=int,
-        help="Binary Ninja bridge pid when multiple GUI instances are running",
-    )
 
 
 def _target_option(
@@ -67,7 +62,6 @@ def _implicit_target(args: argparse.Namespace) -> str:
         "list_targets",
         params={},
         target=None,
-        instance_pid=getattr(args, "instance", None),
     )
     targets = list(response["result"])
     if len(targets) == 1:
@@ -119,7 +113,6 @@ def _call(
         op,
         params=request_params,
         target=target,
-        instance_pid=getattr(args, "instance", None),
     )
     result = response["result"]
     if effective_page_limit is not None and isinstance(result, list) and len(result) > effective_page_limit:
@@ -564,7 +557,6 @@ def _doctor(args: argparse.Namespace) -> int:
                 "doctor",
                 params={},
                 target=None,
-                instance_pid=instance.pid,
             )
             ping = response["result"]
         except Exception as exc:
@@ -628,8 +620,6 @@ def _plugin_install(args: argparse.Namespace) -> int:
 
 
 def _target_list(args: argparse.Namespace) -> int:
-    if args.instance is not None:
-        choose_instance(instance_pid=args.instance)
     return _call(
         args,
         "list_targets",

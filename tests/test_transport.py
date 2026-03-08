@@ -61,43 +61,12 @@ def test_send_request_uses_registry_and_socket(tmp_path, monkeypatch):
     try:
         instances = list_instances()
         assert len(instances) == 1
-        instance = choose_instance(target=f"{pid}:1:999")
+        instance = choose_instance()
         assert instance.pid == pid
 
         response = send_request("ping", params={"hello": "world"}, target=f"{pid}:1:999")
         assert response["result"]["op"] == "ping"
         assert response["result"]["params"] == {"hello": "world"}
-    finally:
-        server.shutdown()
-        server.server_close()
-
-
-def test_choose_instance_accepts_pid_prefixed_human_selector(tmp_path, monkeypatch):
-    monkeypatch.setenv("BN_CACHE_DIR", str(tmp_path))
-    pid = os.getpid()
-    registry_path = bridge_registry_path()
-    registry_path.parent.mkdir(parents=True, exist_ok=True)
-
-    socket_path = Path("/tmp") / f"bn-test-{os.getpid()}-{uuid.uuid4().hex[:8]}.sock"
-    server = _Server(str(socket_path), _Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-
-    registry_path.write_text(
-        json.dumps(
-            {
-                "pid": pid,
-                "socket_path": str(socket_path),
-                "plugin_name": "bn_agent_bridge",
-                "plugin_version": "0.1.0",
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    try:
-        instance = choose_instance(target=f"{pid}:SnailMail_unwrapped.exe.bndb")
-        assert instance.pid == pid
     finally:
         server.shutdown()
         server.server_close()
@@ -147,7 +116,7 @@ def test_send_request_wraps_socket_errors(tmp_path, monkeypatch):
         started_at=None,
         meta={},
     )
-    monkeypatch.setattr("bn.transport.choose_instance", lambda **_: instance)
+    monkeypatch.setattr("bn.transport.choose_instance", lambda: instance)
 
     with pytest.raises(BridgeError, match="Failed to contact Binary Ninja bridge pid 999"):
         send_request("doctor")
@@ -165,7 +134,7 @@ def test_send_request_retries_transient_connect_failures(tmp_path, monkeypatch):
         started_at=None,
         meta={},
     )
-    monkeypatch.setattr("bn.transport.choose_instance", lambda **_: instance)
+    monkeypatch.setattr("bn.transport.choose_instance", lambda: instance)
 
     class _FakeSocket:
         attempts = 0

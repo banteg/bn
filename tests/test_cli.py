@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import bn.cli
 
@@ -9,7 +8,7 @@ import bn.cli
 def test_function_list_defaults_to_active_target(monkeypatch, capsys):
     captured = {}
 
-    def fake_send_request(op, *, params=None, target=None, instance_pid=None, timeout=30.0):
+    def fake_send_request(op, *, params=None, target=None, timeout=30.0):
         captured["op"] = op
         captured["params"] = params
         captured["target"] = target
@@ -27,7 +26,7 @@ def test_function_list_defaults_to_active_target(monkeypatch, capsys):
 def test_function_list_warns_on_truncation(monkeypatch, capsys):
     captured = {}
 
-    def fake_send_request(op, *, params=None, target=None, instance_pid=None, timeout=30.0):
+    def fake_send_request(op, *, params=None, target=None, timeout=30.0):
         captured["op"] = op
         captured["params"] = params
         captured["target"] = target
@@ -53,7 +52,7 @@ def test_function_list_warns_on_truncation(monkeypatch, capsys):
 def test_function_info_uses_active_target_and_text_renderer(monkeypatch, capsys):
     captured = {}
 
-    def fake_send_request(op, *, params=None, target=None, instance_pid=None, timeout=30.0):
+    def fake_send_request(op, *, params=None, target=None, timeout=30.0):
         captured["op"] = op
         captured["params"] = params
         captured["target"] = target
@@ -84,7 +83,7 @@ def test_function_info_uses_active_target_and_text_renderer(monkeypatch, capsys)
 def test_symbol_rename_builds_preview_payload(monkeypatch):
     captured = {}
 
-    def fake_send_request(op, *, params=None, target=None, instance_pid=None, timeout=30.0):
+    def fake_send_request(op, *, params=None, target=None, timeout=30.0):
         captured["op"] = op
         captured["params"] = params
         captured["target"] = target
@@ -112,7 +111,7 @@ def test_symbol_rename_builds_preview_payload(monkeypatch):
 def test_symbol_rename_defaults_to_active_when_single_target_open(monkeypatch):
     calls = []
 
-    def fake_send_request(op, *, params=None, target=None, instance_pid=None, timeout=30.0):
+    def fake_send_request(op, *, params=None, target=None, timeout=30.0):
         calls.append({"op": op, "params": params, "target": target})
         if op == "list_targets":
             return {
@@ -138,7 +137,7 @@ def test_symbol_rename_defaults_to_active_when_single_target_open(monkeypatch):
 
 
 def test_symbol_rename_requires_target_when_multiple_targets_are_open(monkeypatch, capsys):
-    def fake_send_request(op, *, params=None, target=None, instance_pid=None, timeout=30.0):
+    def fake_send_request(op, *, params=None, target=None, timeout=30.0):
         if op == "list_targets":
             return {
                 "ok": True,
@@ -174,7 +173,7 @@ def test_plugin_install_copy_mode(tmp_path):
 
 
 def test_target_list_text_format_renders_summary(monkeypatch, capsys):
-    def fake_send_request(op, *, params=None, target=None, instance_pid=None, timeout=30.0):
+    def fake_send_request(op, *, params=None, target=None, timeout=30.0):
         assert op == "list_targets"
         return {
             "ok": True,
@@ -204,7 +203,7 @@ def test_target_list_text_format_renders_summary(monkeypatch, capsys):
 def test_types_show_uses_type_info_and_text_renderer(monkeypatch, capsys):
     captured = {}
 
-    def fake_send_request(op, *, params=None, target=None, instance_pid=None, timeout=30.0):
+    def fake_send_request(op, *, params=None, target=None, timeout=30.0):
         captured["op"] = op
         captured["params"] = params
         captured["target"] = target
@@ -234,7 +233,7 @@ def test_types_show_uses_type_info_and_text_renderer(monkeypatch, capsys):
 def test_types_declare_defaults_to_active_when_single_target_open(monkeypatch):
     calls = []
 
-    def fake_send_request(op, *, params=None, target=None, instance_pid=None, timeout=30.0):
+    def fake_send_request(op, *, params=None, target=None, timeout=30.0):
         calls.append({"op": op, "params": params, "target": target})
         if op == "list_targets":
             return {
@@ -258,7 +257,7 @@ def test_types_declare_defaults_to_active_when_single_target_open(monkeypatch):
 def test_xrefs_field_routes_to_field_xrefs(monkeypatch, capsys):
     captured = {}
 
-    def fake_send_request(op, *, params=None, target=None, instance_pid=None, timeout=30.0):
+    def fake_send_request(op, *, params=None, target=None, timeout=30.0):
         captured["op"] = op
         captured["params"] = params
         captured["target"] = target
@@ -290,7 +289,7 @@ def test_xrefs_field_routes_to_field_xrefs(monkeypatch, capsys):
 
 
 def test_xrefs_text_format_renders_summary(monkeypatch, capsys):
-    def fake_send_request(op, *, params=None, target=None, instance_pid=None, timeout=30.0):
+    def fake_send_request(op, *, params=None, target=None, timeout=30.0):
         assert op == "xrefs"
         return {
             "ok": True,
@@ -315,7 +314,7 @@ def test_xrefs_text_format_renders_summary(monkeypatch, capsys):
 def test_comment_get_defaults_to_active_when_single_target_open(monkeypatch, capsys):
     calls = []
 
-    def fake_send_request(op, *, params=None, target=None, instance_pid=None, timeout=30.0):
+    def fake_send_request(op, *, params=None, target=None, timeout=30.0):
         calls.append({"op": op, "params": params, "target": target})
         if op == "list_targets":
             return {
@@ -339,7 +338,7 @@ def test_comment_get_defaults_to_active_when_single_target_open(monkeypatch, cap
 def test_py_exec_accepts_inline_code(monkeypatch):
     captured = {}
 
-    def fake_send_request(op, *, params=None, target=None, instance_pid=None, timeout=30.0):
+    def fake_send_request(op, *, params=None, target=None, timeout=30.0):
         captured["op"] = op
         captured["params"] = params
         captured["target"] = target
@@ -363,7 +362,7 @@ def test_py_exec_missing_script_mentions_code(capsys):
 
 
 def test_strings_text_format_renders_rows(monkeypatch, capsys):
-    def fake_send_request(op, *, params=None, target=None, instance_pid=None, timeout=30.0):
+    def fake_send_request(op, *, params=None, target=None, timeout=30.0):
         assert op == "strings"
         return {
             "ok": True,
@@ -388,7 +387,7 @@ def test_strings_text_format_renders_rows(monkeypatch, capsys):
 
 
 def test_py_exec_text_format_renders_stdout_and_result(monkeypatch, capsys):
-    def fake_send_request(op, *, params=None, target=None, instance_pid=None, timeout=30.0):
+    def fake_send_request(op, *, params=None, target=None, timeout=30.0):
         assert op == "py_exec"
         return {
             "ok": True,
@@ -409,7 +408,7 @@ def test_py_exec_text_format_renders_stdout_and_result(monkeypatch, capsys):
 
 
 def test_symbol_rename_text_format_renders_mutation_summary(monkeypatch, capsys):
-    def fake_send_request(op, *, params=None, target=None, instance_pid=None, timeout=30.0):
+    def fake_send_request(op, *, params=None, target=None, timeout=30.0):
         assert op == "rename_symbol"
         return {
             "ok": True,
@@ -461,7 +460,7 @@ def test_symbol_rename_text_format_renders_mutation_summary(monkeypatch, capsys)
 
 
 def test_decompile_text_format_unwraps_text_field(monkeypatch, capsys):
-    def fake_send_request(op, *, params=None, target=None, instance_pid=None, timeout=30.0):
+    def fake_send_request(op, *, params=None, target=None, timeout=30.0):
         return {
             "ok": True,
             "result": {
