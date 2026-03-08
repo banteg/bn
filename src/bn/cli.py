@@ -100,8 +100,8 @@ def _doctor(args: argparse.Namespace) -> int:
                 instance_pid=instance.pid,
             )
             ping = response["result"]
-        except BridgeError as exc:
-            ping = {"ok": False, "error": str(exc)}
+        except Exception as exc:
+            ping = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
         instances.append(
             {

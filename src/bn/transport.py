@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import socket
 import uuid
 from dataclasses import dataclass
@@ -29,6 +31,30 @@ class BridgeInstance:
         return f"{self.pid}:{self.plugin_version}"
 
 
+def _purge_stale_instance(registry_path: Path, socket_path: Path) -> None:
+    for path in (registry_path, socket_path):
+        with contextlib.suppress(OSError):
+            path.unlink()
+
+
+def _pid_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _socket_is_live(socket_path: Path, timeout: float = 0.2) -> bool:
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            sock.connect(str(socket_path))
+        return True
+    except OSError:
+        return False
+
+
 def _load_instance(path: Path) -> BridgeInstance | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -38,6 +64,15 @@ def _load_instance(path: Path) -> BridgeInstance | None:
         return None
 
     if not socket_path.exists():
+        _purge_stale_instance(path, socket_path)
+        return None
+
+    if not _pid_exists(pid):
+        _purge_stale_instance(path, socket_path)
+        return None
+
+    if not _socket_is_live(socket_path):
+        _purge_stale_instance(path, socket_path)
         return None
 
     return BridgeInstance(
@@ -114,17 +149,22 @@ def send_request(
 
     encoded = (json.dumps(payload) + "\n").encode("utf-8")
 
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-        sock.settimeout(timeout)
-        sock.connect(str(instance.socket_path))
-        sock.sendall(encoded)
-        sock.shutdown(socket.SHUT_WR)
-        chunks: list[bytes] = []
-        while True:
-            chunk = sock.recv(65536)
-            if not chunk:
-                break
-            chunks.append(chunk)
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            sock.connect(str(instance.socket_path))
+            sock.sendall(encoded)
+            sock.shutdown(socket.SHUT_WR)
+            chunks: list[bytes] = []
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+    except OSError as exc:
+        raise BridgeError(
+            f"Failed to contact Binary Ninja bridge pid {instance.pid} at {instance.socket_path}: {exc}"
+        ) from exc
 
     if not chunks:
         raise BridgeError("Binary Ninja bridge returned an empty response")
