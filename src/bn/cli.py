@@ -124,20 +124,26 @@ def _call(
     return 0
 
 
+def _render_fallback_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, indent=2, sort_keys=True)
+
+
 def _text_field(field: str) -> Callable[[Any], str]:
     def render(value: Any) -> str:
         if isinstance(value, dict):
             text = value.get(field)
             if isinstance(text, str):
                 return text
-        return str(value)
+        return _render_fallback_text(value)
 
     return render
 
 
 def _render_function_info_text(value: Any) -> str:
     if not isinstance(value, dict):
-        return str(value)
+        return _render_fallback_text(value)
 
     function = value.get("function") or {}
     lines = [
@@ -165,19 +171,19 @@ def _render_function_info_text(value: Any) -> str:
 
 def _render_type_info_text(value: Any) -> str:
     if not isinstance(value, dict):
-        return str(value)
+        return _render_fallback_text(value)
     layout = value.get("layout")
     if isinstance(layout, str) and layout:
         return layout
     decl = value.get("decl")
     if isinstance(decl, str) and decl:
         return decl
-    return json.dumps(value, indent=2, sort_keys=True)
+    return _render_fallback_text(value)
 
 
 def _render_field_xrefs_text(value: Any) -> str:
     if not isinstance(value, dict):
-        return str(value)
+        return _render_fallback_text(value)
 
     field = value.get("field") or {}
     lines = [
@@ -218,11 +224,318 @@ def _render_field_xrefs_text(value: Any) -> str:
 
 def _render_comment_text(value: Any) -> str:
     if not isinstance(value, dict):
-        return str(value)
+        return _render_fallback_text(value)
     comment = value.get("comment")
     if isinstance(comment, str):
         return comment
-    return json.dumps(value, indent=2, sort_keys=True)
+    return _render_fallback_text(value)
+
+
+def _render_target_summary(value: dict[str, Any]) -> str:
+    label = value.get("selector") or value.get("target_id") or "<unknown>"
+    lines = [str(label)]
+    if value.get("active"):
+        lines[0] += " [active]"
+
+    details = [
+        ("target", value.get("target_id")),
+        ("view", value.get("view_id")),
+        ("kind", value.get("view_name")),
+        ("file", value.get("filename")),
+        ("arch", value.get("arch")),
+        ("platform", value.get("platform")),
+        ("entry", value.get("entry_point")),
+    ]
+    for key, item in details:
+        if item not in (None, ""):
+            lines.append(f"{key}: {item}")
+    return "\n".join(lines)
+
+
+def _render_target_list_text(value: Any) -> str:
+    if not isinstance(value, list):
+        return _render_fallback_text(value)
+    if not value:
+        return "no targets"
+    return "\n\n".join(
+        _render_target_summary(item) if isinstance(item, dict) else _render_fallback_text(item)
+        for item in value
+    )
+
+
+def _render_target_info_text(value: Any) -> str:
+    if not isinstance(value, dict):
+        return _render_fallback_text(value)
+    return _render_target_summary(value)
+
+
+def _render_name_address_list_text(value: Any) -> str:
+    if not isinstance(value, list):
+        return _render_fallback_text(value)
+    if not value:
+        return "none"
+
+    lines = []
+    for item in value:
+        if not isinstance(item, dict):
+            lines.append(_render_fallback_text(item))
+            continue
+        address = item.get("address", "<unknown>")
+        name = item.get("name") or item.get("function") or "<unknown>"
+        line = f"{address}  {name}"
+        raw_name = item.get("raw_name")
+        if raw_name and raw_name != name:
+            line += f" (raw: {raw_name})"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _render_xrefs_text(value: Any) -> str:
+    if not isinstance(value, dict):
+        return _render_fallback_text(value)
+
+    lines = [
+        f"xrefs to {value.get('address', '<unknown>')}",
+        "",
+        "code refs:",
+    ]
+    code_refs = list(value.get("code_refs") or [])
+    if code_refs:
+        for ref in code_refs:
+            if not isinstance(ref, dict):
+                lines.append("- " + _render_fallback_text(ref))
+                continue
+            details = [str(ref.get("address", "<unknown>"))]
+            if ref.get("function"):
+                details.append(str(ref["function"]))
+            lines.append("- " + " | ".join(details))
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "data refs:"])
+    data_refs = list(value.get("data_refs") or [])
+    if data_refs:
+        for ref in data_refs:
+            if not isinstance(ref, dict):
+                lines.append("- " + _render_fallback_text(ref))
+                continue
+            details = [str(ref.get("address", "<unknown>"))]
+            if ref.get("function"):
+                details.append(str(ref["function"]))
+            lines.append("- " + " | ".join(details))
+    else:
+        lines.append("- none")
+    return "\n".join(lines)
+
+
+def _render_type_list_text(value: Any) -> str:
+    if not isinstance(value, list):
+        return _render_fallback_text(value)
+    if not value:
+        return "none"
+
+    lines = []
+    for item in value:
+        if not isinstance(item, dict):
+            lines.append(_render_fallback_text(item))
+            continue
+        name = item.get("name", "<unknown>")
+        kind = item.get("kind", "<unknown>")
+        decl = item.get("decl")
+        line = f"{name} | {kind}"
+        if decl:
+            line += f" | {decl}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _render_strings_text(value: Any) -> str:
+    if not isinstance(value, list):
+        return _render_fallback_text(value)
+    if not value:
+        return "none"
+
+    lines = []
+    for item in value:
+        if not isinstance(item, dict):
+            lines.append(_render_fallback_text(item))
+            continue
+        address = item.get("address", "<unknown>")
+        length = item.get("length", "?")
+        string_type = item.get("type", "")
+        rendered = json.dumps(item.get("value", ""), ensure_ascii=True)
+        lines.append(f"{address}  len={length}  {string_type}  {rendered}".rstrip())
+    return "\n".join(lines)
+
+
+def _render_data_text(value: Any) -> str:
+    if not isinstance(value, list):
+        return _render_fallback_text(value)
+    if not value:
+        return "none"
+
+    lines = []
+    for item in value:
+        if not isinstance(item, dict):
+            lines.append(_render_fallback_text(item))
+            continue
+        address = item.get("address", "<unknown>")
+        name = item.get("name") or "<anonymous>"
+        type_name = item.get("type") or "<unknown>"
+        lines.append(f"{address}  {name}  {type_name}")
+    return "\n".join(lines)
+
+
+def _render_doctor_text(value: Any) -> str:
+    if not isinstance(value, dict):
+        return _render_fallback_text(value)
+
+    lines = [
+        f"cli version: {value.get('cli_version', '<unknown>')}",
+        f"plugin source: {value.get('plugin_source_dir', '<unknown>')}",
+        f"plugin install: {value.get('plugin_install_dir', '<unknown>')}",
+        "",
+        "instances:",
+    ]
+    instances = list(value.get("instances") or [])
+    if not instances:
+        lines.append("- none")
+        return "\n".join(lines)
+
+    for item in instances:
+        if not isinstance(item, dict):
+            lines.append("- " + _render_fallback_text(item))
+            continue
+        doctor = item.get("doctor") if isinstance(item.get("doctor"), dict) else {}
+        status = "ok" if doctor.get("ok") else "error"
+        lines.append(
+            "- "
+            + f"pid={item.get('pid', '<unknown>')} plugin={item.get('plugin_version', '<unknown>')} status={status}"
+        )
+        if item.get("started_at"):
+            lines.append(f"  started: {item['started_at']}")
+        if item.get("socket_path"):
+            lines.append(f"  socket: {item['socket_path']}")
+        error = doctor.get("error")
+        if error:
+            lines.append(f"  error: {error}")
+    return "\n".join(lines)
+
+
+def _format_operation_result(item: dict[str, Any]) -> str:
+    op = item.get("op", "<unknown>")
+    if op == "rename_symbol":
+        return f"rename_symbol {item.get('kind', 'auto')} {item.get('address', '<unknown>')} -> {item.get('new_name', '<unknown>')}"
+    if op == "set_comment":
+        target = item.get("function") or item.get("address", "<unknown>")
+        return f"set_comment {target}"
+    if op == "delete_comment":
+        target = item.get("function") or item.get("address", "<unknown>")
+        return f"delete_comment {target}"
+    if op == "set_prototype":
+        return f"set_prototype {item.get('function', '<unknown>')} @ {item.get('address', '<unknown>')}"
+    if op in {"local_rename", "local_retype"}:
+        return f"{op} {item.get('function', '<unknown>')}::{item.get('variable', '<unknown>')}"
+    if op == "struct_field_set":
+        return (
+            f"struct_field_set {item.get('struct_name', '<unknown>')} "
+            f"{item.get('offset', '<unknown>')} {item.get('field_name', '<unknown>')} {item.get('field_type', '<unknown>')}"
+        )
+    if op == "struct_field_rename":
+        return (
+            f"struct_field_rename {item.get('struct_name', '<unknown>')} "
+            f"{item.get('old_name', '<unknown>')} -> {item.get('new_name', '<unknown>')}"
+        )
+    if op == "struct_field_delete":
+        return f"struct_field_delete {item.get('struct_name', '<unknown>')}::{item.get('field_name', '<unknown>')}"
+    if op == "struct_replace":
+        return f"struct_replace {', '.join(sorted((item.get('defined_types') or {}).keys())) or '<none>'}"
+    if op == "types_declare":
+        return f"types_declare {item.get('count', 0)} types"
+    if op == "patch_bytes":
+        return f"patch_bytes {item.get('address', '<unknown>')} {item.get('patched', '<unknown>')}"
+    return _render_fallback_text(item)
+
+
+def _render_mutation_text(value: Any) -> str:
+    if not isinstance(value, dict):
+        return _render_fallback_text(value)
+
+    lines = [f"preview: {bool(value.get('preview'))}", "", "results:"]
+    results = list(value.get("results") or [])
+    if results:
+        for item in results:
+            if isinstance(item, dict):
+                summary = _format_operation_result(item)
+                if "changed" in item:
+                    summary += f" [changed={bool(item['changed'])}]"
+                if item.get("message"):
+                    summary += f" ({item['message']})"
+                lines.append("- " + summary)
+            else:
+                lines.append("- " + _render_fallback_text(item))
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "affected functions:"])
+    affected_functions = list(value.get("affected_functions") or [])
+    if affected_functions:
+        for item in affected_functions:
+            if not isinstance(item, dict):
+                lines.append("- " + _render_fallback_text(item))
+                continue
+            before_name = item.get("before_name") or item.get("after_name") or "<unknown>"
+            after_name = item.get("after_name") or before_name
+            summary = f"{item.get('address', '<unknown>')} {before_name}"
+            if after_name != before_name:
+                summary += f" -> {after_name}"
+            summary += f" [changed={bool(item.get('changed'))}]"
+            lines.append("- " + summary)
+            if item.get("diff"):
+                lines.append(str(item["diff"]))
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "affected types:"])
+    affected_types = list(value.get("affected_types") or [])
+    if affected_types:
+        for item in affected_types:
+            if not isinstance(item, dict):
+                lines.append("- " + _render_fallback_text(item))
+                continue
+            summary = f"{item.get('type_name', '<unknown>')} [changed={bool(item.get('changed'))}]"
+            if item.get("message"):
+                summary += f" ({item['message']})"
+            lines.append("- " + summary)
+            if item.get("layout_diff"):
+                lines.append(str(item["layout_diff"]))
+    else:
+        lines.append("- none")
+    return "\n".join(lines)
+
+
+def _render_py_exec_text(value: Any) -> str:
+    if not isinstance(value, dict):
+        return _render_fallback_text(value)
+
+    parts: list[str] = []
+    stdout = value.get("stdout")
+    if isinstance(stdout, str) and stdout:
+        parts.append(stdout.rstrip("\n"))
+
+    result = value.get("result")
+    if result is not None:
+        body = result if isinstance(result, str) else json.dumps(result, indent=2, sort_keys=True)
+        prefix = "result:\n" if parts else "result:\n"
+        parts.append(prefix + body)
+
+    artifact = value.get("artifact")
+    if isinstance(artifact, dict) and artifact.get("artifact_path"):
+        parts.append(f"artifact: {artifact['artifact_path']}")
+
+    if not parts:
+        return ""
+    return "\n\n".join(parts)
 
 
 def _doctor(args: argparse.Namespace) -> int:
@@ -256,6 +569,8 @@ def _doctor(args: argparse.Namespace) -> int:
         "plugin_install_dir": str(plugin_install_dir()),
         "instances": instances,
     }
+    if args.format in {"text", "md"}:
+        result = _render_doctor_text(result)
     _render_result(result, fmt=args.format, out_path=args.out, stem="doctor")
     return 0
 
@@ -298,7 +613,14 @@ def _plugin_install(args: argparse.Namespace) -> int:
 def _target_list(args: argparse.Namespace) -> int:
     if args.instance is not None:
         choose_instance(instance_pid=args.instance)
-    return _call(args, "list_targets", {}, require_target=False, stem="targets")
+    return _call(
+        args,
+        "list_targets",
+        {},
+        require_target=False,
+        text_renderer=_render_target_list_text,
+        stem="targets",
+    )
 
 
 def _target_info(args: argparse.Namespace) -> int:
@@ -308,6 +630,7 @@ def _target_info(args: argparse.Namespace) -> int:
         {"selector": args.target},
         require_target=True,
         allow_implicit_target=True,
+        text_renderer=_render_target_info_text,
         stem="target-info",
     )
 
@@ -318,6 +641,7 @@ def _function_list(args: argparse.Namespace) -> int:
         "list_functions",
         {"offset": args.offset, "limit": args.limit},
         require_target=True,
+        text_renderer=_render_name_address_list_text,
         stem="functions",
     )
 
@@ -328,6 +652,7 @@ def _function_search(args: argparse.Namespace) -> int:
         "search_functions",
         {"query": args.query, "offset": args.offset, "limit": args.limit},
         require_target=True,
+        text_renderer=_render_name_address_list_text,
         stem="function-search",
     )
 
@@ -395,6 +720,7 @@ def _xrefs(args: argparse.Namespace) -> int:
         "xrefs",
         {"identifier": args.identifier},
         require_target=True,
+        text_renderer=_render_xrefs_text,
         stem="xrefs",
     )
 
@@ -405,6 +731,7 @@ def _types(args: argparse.Namespace) -> int:
         "types",
         {"query": args.query, "offset": args.offset, "limit": args.limit},
         require_target=True,
+        text_renderer=_render_type_list_text,
         stem="types",
     )
 
@@ -444,6 +771,7 @@ def _types_declare(args: argparse.Namespace) -> int:
         },
         require_target=True,
         allow_implicit_target=True,
+        text_renderer=_render_mutation_text,
         stem="types-declare",
     )
 
@@ -454,12 +782,20 @@ def _strings(args: argparse.Namespace) -> int:
         "strings",
         {"query": args.query, "offset": args.offset, "limit": args.limit},
         require_target=True,
+        text_renderer=_render_strings_text,
         stem="strings",
     )
 
 
 def _imports(args: argparse.Namespace) -> int:
-    return _call(args, "imports", {}, require_target=True, stem="imports")
+    return _call(
+        args,
+        "imports",
+        {},
+        require_target=True,
+        text_renderer=_render_name_address_list_text,
+        stem="imports",
+    )
 
 
 def _data(args: argparse.Namespace) -> int:
@@ -468,6 +804,7 @@ def _data(args: argparse.Namespace) -> int:
         "data",
         {"offset": args.offset, "limit": args.limit},
         require_target=True,
+        text_renderer=_render_data_text,
         stem="data",
     )
 
@@ -515,6 +852,7 @@ def _py_exec(args: argparse.Namespace) -> int:
         {"script": script, "out_path": str(args.out) if args.out else None},
         require_target=True,
         allow_implicit_target=True,
+        text_renderer=_render_py_exec_text,
         stem="py-exec",
     )
 
@@ -531,6 +869,7 @@ def _symbol_rename(args: argparse.Namespace) -> int:
         },
         require_target=True,
         allow_implicit_target=True,
+        text_renderer=_render_mutation_text,
         stem="symbol-rename",
     )
 
@@ -547,6 +886,7 @@ def _comment_set(args: argparse.Namespace) -> int:
         },
         require_target=True,
         allow_implicit_target=True,
+        text_renderer=_render_mutation_text,
         stem="comment-set",
     )
 
@@ -577,6 +917,7 @@ def _comment_delete(args: argparse.Namespace) -> int:
         },
         require_target=True,
         allow_implicit_target=True,
+        text_renderer=_render_mutation_text,
         stem="comment-delete",
     )
 
@@ -592,6 +933,7 @@ def _proto_set(args: argparse.Namespace) -> int:
         },
         require_target=True,
         allow_implicit_target=True,
+        text_renderer=_render_mutation_text,
         stem="prototype-set",
     )
 
@@ -608,6 +950,7 @@ def _local_rename(args: argparse.Namespace) -> int:
         },
         require_target=True,
         allow_implicit_target=True,
+        text_renderer=_render_mutation_text,
         stem="local-rename",
     )
 
@@ -624,6 +967,7 @@ def _local_retype(args: argparse.Namespace) -> int:
         },
         require_target=True,
         allow_implicit_target=True,
+        text_renderer=_render_mutation_text,
         stem="local-retype",
     )
 
@@ -642,6 +986,7 @@ def _struct_field_set(args: argparse.Namespace) -> int:
         },
         require_target=True,
         allow_implicit_target=True,
+        text_renderer=_render_mutation_text,
         stem="struct-field-set",
     )
 
@@ -672,6 +1017,7 @@ def _struct_field_rename(args: argparse.Namespace) -> int:
         },
         require_target=True,
         allow_implicit_target=True,
+        text_renderer=_render_mutation_text,
         stem="struct-field-rename",
     )
 
@@ -687,6 +1033,7 @@ def _struct_field_delete(args: argparse.Namespace) -> int:
         },
         require_target=True,
         allow_implicit_target=True,
+        text_renderer=_render_mutation_text,
         stem="struct-field-delete",
     )
 
@@ -701,6 +1048,7 @@ def _struct_replace(args: argparse.Namespace) -> int:
         },
         require_target=True,
         allow_implicit_target=True,
+        text_renderer=_render_mutation_text,
         stem="struct-replace",
     )
 
@@ -716,6 +1064,7 @@ def _patch_bytes(args: argparse.Namespace) -> int:
         },
         require_target=True,
         allow_implicit_target=True,
+        text_renderer=_render_mutation_text,
         stem="patch-bytes",
     )
 
@@ -729,6 +1078,7 @@ def _batch_apply(args: argparse.Namespace) -> int:
         "batch_apply",
         manifest,
         require_target=False,
+        text_renderer=_render_mutation_text,
         stem="batch-apply",
     )
 

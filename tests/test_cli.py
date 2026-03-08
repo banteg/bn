@@ -146,6 +146,34 @@ def test_plugin_install_copy_mode(tmp_path):
     assert (destination / "bridge.py").exists()
 
 
+def test_target_list_text_format_renders_summary(monkeypatch, capsys):
+    def fake_send_request(op, *, params=None, target=None, instance_pid=None, timeout=30.0):
+        assert op == "list_targets"
+        return {
+            "ok": True,
+            "result": [
+                {
+                    "selector": "SnailMail_unwrapped.exe.bndb",
+                    "target_id": "123:1:7",
+                    "view_id": "1",
+                    "view_name": "PE",
+                    "filename": "/tmp/SnailMail_unwrapped.exe.bndb",
+                    "active": True,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(bn.cli, "send_request", fake_send_request)
+
+    rc = bn.cli.main(["target", "list", "--format", "text"])
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "SnailMail_unwrapped.exe.bndb [active]" in output
+    assert "target: 123:1:7" in output
+    assert '"selector"' not in output
+
+
 def test_types_show_uses_type_info_and_text_renderer(monkeypatch, capsys):
     captured = {}
 
@@ -234,6 +262,29 @@ def test_xrefs_field_routes_to_field_xrefs(monkeypatch, capsys):
     assert "code refs:" in output
 
 
+def test_xrefs_text_format_renders_summary(monkeypatch, capsys):
+    def fake_send_request(op, *, params=None, target=None, instance_pid=None, timeout=30.0):
+        assert op == "xrefs"
+        return {
+            "ok": True,
+            "result": {
+                "address": "0x401000",
+                "code_refs": [{"address": "0x402000", "function": "sub_402000"}],
+                "data_refs": [{"address": "0x403000", "function": "sub_403000"}],
+            },
+        }
+
+    monkeypatch.setattr(bn.cli, "send_request", fake_send_request)
+
+    rc = bn.cli.main(["xrefs", "--format", "text", "sub_401000"])
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "xrefs to 0x401000" in output
+    assert "- 0x402000 | sub_402000" in output
+    assert "- 0x403000 | sub_403000" in output
+
+
 def test_comment_get_defaults_to_active_when_single_target_open(monkeypatch, capsys):
     calls = []
 
@@ -282,6 +333,104 @@ def test_py_exec_missing_script_mentions_code(capsys):
 
     assert rc == 2
     assert "Use --code for inline Python" in capsys.readouterr().err
+
+
+def test_strings_text_format_renders_rows(monkeypatch, capsys):
+    def fake_send_request(op, *, params=None, target=None, instance_pid=None, timeout=30.0):
+        assert op == "strings"
+        return {
+            "ok": True,
+            "result": [
+                {
+                    "address": "0x500000",
+                    "length": 6,
+                    "type": "AsciiString",
+                    "value": "follow",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(bn.cli, "send_request", fake_send_request)
+
+    rc = bn.cli.main(["strings", "--format", "text", "--query", "follow"])
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert '0x500000  len=6  AsciiString  "follow"' in output
+    assert '"value"' not in output
+
+
+def test_py_exec_text_format_renders_stdout_and_result(monkeypatch, capsys):
+    def fake_send_request(op, *, params=None, target=None, instance_pid=None, timeout=30.0):
+        assert op == "py_exec"
+        return {
+            "ok": True,
+            "result": {
+                "stdout": "hi\n",
+                "result": {"functions": 7},
+            },
+        }
+
+    monkeypatch.setattr(bn.cli, "send_request", fake_send_request)
+
+    rc = bn.cli.main(["py", "exec", "--format", "text", "--target", "active", "--code", "print('hi')"])
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert output.startswith("hi\n\nresult:\n")
+    assert '"functions": 7' in output
+
+
+def test_symbol_rename_text_format_renders_mutation_summary(monkeypatch, capsys):
+    def fake_send_request(op, *, params=None, target=None, instance_pid=None, timeout=30.0):
+        assert op == "rename_symbol"
+        return {
+            "ok": True,
+            "result": {
+                "preview": True,
+                "results": [
+                    {
+                        "op": "rename_symbol",
+                        "kind": "function",
+                        "address": "0x401000",
+                        "new_name": "player_update",
+                    }
+                ],
+                "affected_functions": [
+                    {
+                        "address": "0x401000",
+                        "before_name": "sub_401000",
+                        "after_name": "player_update",
+                        "changed": True,
+                        "diff": "--- before:sub_401000\n+++ after:player_update",
+                    }
+                ],
+                "affected_types": [],
+            },
+        }
+
+    monkeypatch.setattr(bn.cli, "send_request", fake_send_request)
+
+    rc = bn.cli.main(
+        [
+            "symbol",
+            "rename",
+            "--format",
+            "text",
+            "--target",
+            "active",
+            "--preview",
+            "sub_401000",
+            "player_update",
+        ]
+    )
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "preview: True" in output
+    assert "rename_symbol function 0x401000 -> player_update" in output
+    assert "0x401000 sub_401000 -> player_update [changed=True]" in output
+    assert '"results"' not in output
 
 
 def test_decompile_text_format_unwraps_text_field(monkeypatch, capsys):
