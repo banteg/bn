@@ -344,6 +344,25 @@ def test_list_locals_returns_stable_ids(monkeypatch):
     assert result["locals"][1]["local_id"].startswith("0x401000:local:")
 
 
+def test_list_locals_skips_stack_aliases_for_parameters(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+    fn = _FakeFunction(0x401000, "player_update")
+    parameter = _FakeVariable(name="arg1", storage=4, var_type="int32_t", identifier=1001)
+    alias = _FakeVariable(name="arg1", storage=4, var_type="int32_t", identifier=1001)
+    local = _FakeVariable(name="var_4", storage=-4, var_type="float", identifier=2001)
+    fn.parameter_vars = [parameter]
+    fn.stack_layout = [alias, local]
+
+    locals_list = instance._list_locals(fn)
+
+    assert len(locals_list) == 2
+    assert [item["local_id"] for item in locals_list] == [
+        "0x401000:param:StackVariableSourceType:4:0:1001",
+        "0x401000:local:StackVariableSourceType:-4:0:2001",
+    ]
+
+
 def test_find_variable_selector_prefers_local_id(monkeypatch):
     bridge = _load_bridge(monkeypatch)
     instance = bridge.BinaryNinjaBridge()

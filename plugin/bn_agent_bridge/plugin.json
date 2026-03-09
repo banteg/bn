@@ -7,5 +7,5 @@
   "api": "python3",
   "description": "Local Unix-socket bridge for the bn CLI",
   "author": "banteg",
-  "version": "0.1.0"
+  "version": "0.5.1"
 }

@@ -95,7 +95,8 @@ def choose_instance() -> BridgeInstance:
     return instances[0]
 
 
-def send_request(
+def _send_request_to_instance(
+    instance: BridgeInstance,
     op: str,
     *,
     params: dict[str, Any] | None = None,
@@ -103,7 +104,6 @@ def send_request(
     timeout: float = 30.0,
     connect_retries: int = 4,
 ) -> dict[str, Any]:
-    instance = choose_instance()
     payload: dict[str, Any] = {
         "id": str(uuid.uuid4()),
         "op": op,
@@ -157,3 +157,22 @@ def send_request(
 
     error = response.get("error") or "Unknown Binary Ninja bridge error"
     raise BridgeError(str(error))
+
+
+def send_request(
+    op: str,
+    *,
+    params: dict[str, Any] | None = None,
+    target: str | None = None,
+    timeout: float = 30.0,
+    connect_retries: int = 4,
+) -> dict[str, Any]:
+    instance = choose_instance()
+    return _send_request_to_instance(
+        instance,
+        op,
+        params=params,
+        target=target,
+        timeout=timeout,
+        connect_retries=connect_retries,
+    )

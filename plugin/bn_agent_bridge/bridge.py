@@ -21,6 +21,7 @@ from binaryninja.mainthread import execute_on_main_thread_and_wait, is_main_thre
 from binaryninja.plugin import PluginCommand
 
 from .paths import PLUGIN_NAME, bridge_registry_path, bridge_socket_path
+from .version import VERSION, build_id_for_file
 
 try:
     import binaryninjaui as ui
@@ -28,7 +29,7 @@ except ImportError:  # pragma: no cover - GUI plugin only
     ui = None
 
 
-VERSION = "0.1.0"
+PLUGIN_BUILD_ID = build_id_for_file(Path(__file__).resolve())
 
 
 def _json_response(*, ok: bool, result: Any = None, error: str | None = None) -> dict[str, Any]:
@@ -470,6 +471,7 @@ class BinaryNinjaBridge:
             "socket_path": str(self.socket_path),
             "plugin_name": PLUGIN_NAME,
             "plugin_version": VERSION,
+            "plugin_build_id": PLUGIN_BUILD_ID,
             "started_at": datetime.now(timezone.utc).isoformat(),
         }
         self.registry_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -587,6 +589,7 @@ class BinaryNinjaBridge:
         return {
             "plugin_name": PLUGIN_NAME,
             "plugin_version": VERSION,
+            "plugin_build_id": PLUGIN_BUILD_ID,
             "pid": os.getpid(),
             "socket_path": str(self.socket_path),
             "targets": self.targets.refresh(),
@@ -855,6 +858,26 @@ class BinaryNinjaBridge:
             "local_id": self._local_id(func, var, is_parameter=is_parameter),
         }
 
+    def _variable_marker(self, var) -> tuple[int | None, int]:
+        return (self._variable_identifier(var), int(getattr(var, "storage", 0)))
+
+    def _iter_canonical_variables(self, func):
+        seen: set[tuple[int | None, int]] = set()
+
+        for var in list(func.parameter_vars):
+            marker = self._variable_marker(var)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            yield var, True
+
+        for var in list(func.stack_layout):
+            marker = self._variable_marker(var)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            yield var, False
+
     def _function_text(self, bv, func, *, view: str = "hlil", ssa: bool = False) -> str:
         il_name = {"hlil": "hlil", "mlil": "mlil", "llil": "llil"}.get(view, "hlil")
         try:
@@ -897,30 +920,23 @@ class BinaryNinjaBridge:
         )
 
     def _list_locals(self, func) -> list[dict[str, Any]]:
-        variables = []
-        seen: set[tuple[int | None, int, bool]] = set()
-        for collection, is_parameter in ((func.parameter_vars, True), (func.stack_layout, False)):
-            for var in list(collection):
-                marker = (self._variable_identifier(var), int(var.storage), is_parameter)
-                if marker in seen:
-                    continue
-                seen.add(marker)
-                variables.append(self._variable_entry(func, var, is_parameter=is_parameter))
+        variables = [
+            self._variable_entry(func, var, is_parameter=is_parameter)
+            for var, is_parameter in self._iter_canonical_variables(func)
+        ]
         return self._sort_variable_entries(variables)
 
     def _find_variables_by_name(self, func, name: str) -> list[tuple[Any, bool]]:
         matches = []
-        for collection, is_parameter in ((func.parameter_vars, True), (func.stack_layout, False)):
-            for var in list(collection):
-                if str(var.name) == name:
-                    matches.append((var, is_parameter))
+        for var, is_parameter in self._iter_canonical_variables(func):
+            if str(var.name) == name:
+                matches.append((var, is_parameter))
         return matches
 
     def _find_variable_selector(self, func, selector: str) -> tuple[Any, bool]:
         locals_by_id: dict[str, tuple[Any, bool]] = {}
-        for collection, is_parameter in ((func.parameter_vars, True), (func.stack_layout, False)):
-            for var in list(collection):
-                locals_by_id[self._local_id(func, var, is_parameter=is_parameter)] = (var, is_parameter)
+        for var, is_parameter in self._iter_canonical_variables(func):
+            locals_by_id[self._local_id(func, var, is_parameter=is_parameter)] = (var, is_parameter)
         if selector in locals_by_id:
             return locals_by_id[selector]
 

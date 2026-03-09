@@ -5,22 +5,19 @@ import json
 import os
 import shutil
 import sys
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, Callable
 
 from .output import write_output
 from .paths import plugin_install_dir, plugin_source_dir
-from .transport import BridgeError, list_instances, send_request
+from .transport import BridgeError, _send_request_to_instance, list_instances, send_request
+from .version import VERSION, build_id_for_file
 
 FAILED_MUTATION_STATUSES = {"unsupported", "verification_failed"}
 
 
 def _package_version() -> str:
-    try:
-        return version("bn")
-    except PackageNotFoundError:
-        return "0.0.0"
+    return VERSION
 
 
 def _common_io_options(parser: argparse.ArgumentParser) -> None:
@@ -458,6 +455,8 @@ def _render_doctor_text(value: Any) -> str:
         f"cli version: {value.get('cli_version', '<unknown>')}",
         f"plugin source: {value.get('plugin_source_dir', '<unknown>')}",
         f"plugin install: {value.get('plugin_install_dir', '<unknown>')}",
+        f"plugin source build: {value.get('plugin_source_build_id', '<unknown>')}",
+        f"plugin install build: {value.get('plugin_install_build_id', '<unknown>')}",
         "",
         "instances:",
     ]
@@ -476,6 +475,13 @@ def _render_doctor_text(value: Any) -> str:
             "- "
             + f"pid={item.get('pid', '<unknown>')} plugin={item.get('plugin_version', '<unknown>')} status={status}"
         )
+        build_id = item.get("plugin_build_id")
+        if build_id:
+            lines.append(f"  build: {build_id}")
+        if item.get("stale_plugin_version"):
+            lines.append("  stale: loaded plugin version differs from CLI version")
+        if item.get("stale_plugin_code"):
+            lines.append("  stale: loaded plugin code does not match installed plugin file")
         if item.get("started_at"):
             lines.append(f"  started: {item['started_at']}")
         if item.get("socket_path"):
@@ -621,11 +627,18 @@ def _render_py_exec_text(value: Any) -> str:
 
 
 def _doctor(args: argparse.Namespace) -> int:
+    install_dir = plugin_install_dir()
+    source_dir = plugin_source_dir()
+    install_bridge = install_dir / "bridge.py"
+    source_bridge = source_dir / "bridge.py"
+    install_build_id = build_id_for_file(install_bridge)
+    source_build_id = build_id_for_file(source_bridge)
     instances = []
     for instance in list_instances():
         ping: dict[str, Any]
         try:
-            response = send_request(
+            response = _send_request_to_instance(
+                instance,
                 "doctor",
                 params={},
                 target=None,
@@ -634,11 +647,25 @@ def _doctor(args: argparse.Namespace) -> int:
         except Exception as exc:
             ping = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
+        loaded_version = ping.get("plugin_version") if isinstance(ping, dict) else None
+        loaded_build_id = ping.get("plugin_build_id") if isinstance(ping, dict) else None
         instances.append(
             {
                 "pid": instance.pid,
                 "socket_path": str(instance.socket_path),
                 "plugin_version": instance.plugin_version,
+                "plugin_build_id": loaded_build_id,
+                "installed_plugin_build_id": install_build_id,
+                "source_plugin_build_id": source_build_id,
+                "stale_plugin_version": (
+                    bool(loaded_version)
+                    and str(loaded_version) != _package_version()
+                ),
+                "stale_plugin_code": (
+                    bool(loaded_build_id)
+                    and install_build_id is not None
+                    and loaded_build_id != install_build_id
+                ),
                 "started_at": instance.started_at,
                 "doctor": ping,
             }
@@ -646,8 +673,10 @@ def _doctor(args: argparse.Namespace) -> int:
 
     result = {
         "cli_version": _package_version(),
-        "plugin_source_dir": str(plugin_source_dir()),
-        "plugin_install_dir": str(plugin_install_dir()),
+        "plugin_source_dir": str(source_dir),
+        "plugin_install_dir": str(install_dir),
+        "plugin_source_build_id": source_build_id,
+        "plugin_install_build_id": install_build_id,
         "instances": instances,
     }
     if args.format == "text":
