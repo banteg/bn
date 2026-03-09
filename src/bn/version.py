@@ -4,7 +4,7 @@ import hashlib
 from pathlib import Path
 
 
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 
 
 def build_id_for_file(path: Path) -> str | None:

@@ -631,7 +631,7 @@ def test_doctor_reports_stale_loaded_plugin(monkeypatch, tmp_path, capsys):
 
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["cli_version"] == "0.6.0"
+    assert payload["cli_version"] == "0.6.1"
     assert payload["plugin_install_build_id"]
     assert payload["instances"][0]["stale_plugin_version"] is True
     assert payload["instances"][0]["stale_plugin_code"] is True
@@ -651,7 +651,7 @@ def test_doctor_text_marks_healthy_instance_ok(monkeypatch, tmp_path, capsys):
         {
             "pid": 123,
             "socket_path": tmp_path / "bridge.sock",
-            "plugin_version": "0.6.0",
+            "plugin_version": "0.6.1",
             "started_at": "2026-03-09T00:00:00+00:00",
         },
     )()
@@ -666,7 +666,7 @@ def test_doctor_text_marks_healthy_instance_ok(monkeypatch, tmp_path, capsys):
             "ok": True,
             "result": {
                 "plugin_name": "bn_agent_bridge",
-                "plugin_version": "0.6.0",
+                "plugin_version": "0.6.1",
                 "plugin_build_id": "newbuild123456",
                 "pid": 123,
                 "socket_path": str(tmp_path / "bridge.sock"),
@@ -679,7 +679,7 @@ def test_doctor_text_marks_healthy_instance_ok(monkeypatch, tmp_path, capsys):
 
     assert rc == 0
     output = capsys.readouterr().out
-    assert "pid=123 plugin=0.6.0 status=ok" in output
+    assert "pid=123 plugin=0.6.1 status=ok" in output
     assert "status=error" not in output
 
 
