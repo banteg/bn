@@ -31,6 +31,8 @@ bn target list
 bn function list
 bn function search attachment
 bn function info sample_track_floor_height_at_position
+bn proto get sample_track_floor_height_at_position
+bn local list sample_track_floor_height_at_position
 bn refresh
 bn decompile sample_track_floor_height_at_position
 bn il sample_track_floor_height_at_position
@@ -48,13 +50,15 @@ bn bundle function sample_track_floor_height_at_position --out /tmp/floor.json
 
 ## Python Escape Hatch
 
-Use inline Python for one-off Binary Ninja inspection that is awkward to express as a built-in command:
+Use inline Python as a normal lane for one-off Binary Ninja inspection that is awkward to express as a built-in command:
 
 ```bash
 bn py exec --code "print(hex(bv.entry_point)); result = {'functions': len(list(bv.functions))}"
 ```
 
 Use `--stdin` for larger snippets. Use `--script <file>` only for real files.
+
+`py exec` always returns `stdout` and `result`. If `result` is not JSON-serializable, the CLI returns `repr(result)` plus a warning instead of silently flattening it.
 
 ## Mutation Workflow
 
@@ -65,6 +69,8 @@ bn types declare "typedef struct Player { int hp; } Player;" --preview
 bn types declare --file /path/to/win32_min.h --preview
 bn struct field set Player 0x308 movement_flag_selector uint32_t --preview
 bn symbol rename sub_401000 player_update --preview
+bn proto get sub_401000
+bn local list sub_401000
 bn proto set sub_401000 "int __cdecl player_update(Player* self)" --preview
 ```
 
@@ -98,7 +104,9 @@ bn refresh
 ## Practical Guidance
 
 - Prefer `bn` over MCP for shell-driven decompilation, search, bundles, and large outputs.
+- Prefer stable `local_id` values from `bn local list` or `bn function info` when renaming or retyping locals.
 - `bn decompile` does not always rewrite post-hoc struct-growth sites away from raw `__offset(...)` expressions, even after a manual analysis refresh.
+- Treat `bn decompile` as the HLIL-text convenience lane; typed layouts live in `bn types show ...` and `bn struct show ...`.
 - Treat `bn types show ...` and `bn struct show ...` as the authoritative typed layouts when decompile output lags behind type recovery.
 - Keep writes sequential when you care about trustworthy preview diffs. Read-side concurrency is much safer than write-side concurrency.
 - Use `--out` when output may be long or when you want a stable artifact.

@@ -36,6 +36,10 @@ def bridge_registry_path() -> Path:
     return cache_home() / f"{PLUGIN_NAME}.json"
 
 
+def bridge_socket_path() -> Path:
+    return cache_home() / f"{PLUGIN_NAME}.sock"
+
+
 def spill_root() -> Path:
     root = Path(tempfile.gettempdir()) / "bn-spills"
     root.mkdir(parents=True, exist_ok=True)

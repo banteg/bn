@@ -30,12 +30,6 @@ def render_value(value: Any, fmt: str) -> str:
             return "\n".join(lines) + ("\n" if lines else "")
         return json.dumps(value, sort_keys=True, default=_json_default) + "\n"
 
-    if fmt == "md":
-        if isinstance(value, str):
-            return value if value.endswith("\n") else value + "\n"
-        rendered = json.dumps(value, indent=2, sort_keys=True, default=_json_default)
-        return f"```json\n{rendered}\n```\n"
-
     if isinstance(value, str):
         return value if value.endswith("\n") else value + "\n"
     return json.dumps(value, indent=2, sort_keys=True, default=_json_default) + "\n"
@@ -88,7 +82,7 @@ def write_output(
     if len(encoded) <= spill_threshold:
         return rendered
 
-    suffix = ".md" if fmt == "md" else ".ndjson" if fmt == "ndjson" else ".json"
+    suffix = ".ndjson" if fmt == "ndjson" else ".txt" if fmt == "text" else ".json"
     spill_path = _spill_path(stem, suffix)
     spill_path.write_bytes(encoded)
     return json.dumps(

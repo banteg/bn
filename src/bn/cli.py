@@ -26,7 +26,7 @@ def _package_version() -> str:
 def _common_io_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--format",
-        choices=("json", "text", "md", "ndjson"),
+        choices=("json", "text", "ndjson"),
         default="json",
         help="Output format",
     )
@@ -111,6 +111,7 @@ def _call(
     page_label: str | None = None,
     stem: str,
     result_exit_code: Callable[[Any], int] | None = None,
+    bridge_writes_output: bool = False,
 ) -> int:
     request_params = dict(params or {})
     effective_page_limit = None
@@ -138,12 +139,12 @@ def _call(
             f"warning: {label} output truncated to {effective_page_limit} items; rerun with --offset {next_offset} or a larger --limit",
             file=sys.stderr,
         )
-    if text_renderer is not None and args.format in {"text", "md"}:
+    if text_renderer is not None and args.format == "text":
         result = text_renderer(result)
     _render_result(
         result,
         fmt=args.format,
-        out_path=args.out,
+        out_path=None if bridge_writes_output else args.out,
         stem=stem,
     )
     return exit_code
@@ -153,6 +154,23 @@ def _render_fallback_text(value: Any) -> str:
     if isinstance(value, str):
         return value
     return json.dumps(value, indent=2, sort_keys=True)
+
+
+def _format_local_entry(item: dict[str, Any]) -> str:
+    role = "param" if item.get("is_parameter") else "local"
+    details = [f"storage={item.get('storage', '?')}"]
+    if item.get("source_type"):
+        details.append(f"source={item['source_type']}")
+    if item.get("index") is not None:
+        details.append(f"index={item['index']}")
+    if item.get("identifier") is not None:
+        details.append(f"identifier={item['identifier']}")
+    if item.get("local_id"):
+        details.append(f"id={item['local_id']}")
+    return (
+        f"- {item.get('type', '<unknown>')} {item.get('name', '<unknown>')} "
+        f"[{role}; {'; '.join(details)}]"
+    )
 
 
 def _text_field(field: str) -> Callable[[Any], str]:
@@ -174,13 +192,16 @@ def _render_function_info_text(value: Any) -> str:
     lines = [
         f"{function.get('name', '<unknown>')} @ {function.get('address', '<unknown>')}",
         str(value.get("prototype", "")),
+        f"return: {value.get('return_type', '<unknown>')}",
+        f"calling convention: {value.get('calling_convention', '<unknown>')}",
+        f"size: {value.get('size', '<unknown>')}",
         "",
         "parameters:",
     ]
     parameters = list(value.get("parameters") or [])
     if parameters:
         for item in parameters:
-            lines.append(f"- {item['type']} {item['name']} (storage={item['storage']})")
+            lines.append(_format_local_entry(item))
     else:
         lines.append("- none")
 
@@ -188,9 +209,33 @@ def _render_function_info_text(value: Any) -> str:
     locals_only = list(value.get("locals") or [])
     if locals_only:
         for item in locals_only:
-            lines.append(f"- {item['type']} {item['name']} (storage={item['storage']})")
+            lines.append(_format_local_entry(item))
     else:
         lines.append("- none")
+    return "\n".join(lines)
+
+
+def _render_proto_text(value: Any) -> str:
+    if not isinstance(value, dict):
+        return _render_fallback_text(value)
+    prototype = value.get("prototype")
+    if isinstance(prototype, str):
+        return prototype
+    return _render_fallback_text(value)
+
+
+def _render_local_list_text(value: Any) -> str:
+    if not isinstance(value, dict):
+        return _render_fallback_text(value)
+    function = value.get("function") or {}
+    lines = [f"{function.get('name', '<unknown>')} @ {function.get('address', '<unknown>')}", ""]
+    locals_only = list(value.get("locals") or [])
+    if not locals_only:
+        lines.append("locals: none")
+        return "\n".join(lines)
+    lines.append("locals:")
+    for item in locals_only:
+        lines.append(_format_local_entry(item))
     return "\n".join(lines)
 
 
@@ -317,6 +362,9 @@ def _render_name_address_list_text(value: Any) -> str:
         address = item.get("address", "<unknown>")
         name = item.get("name") or item.get("function") or "<unknown>"
         line = f"{address}  {name}"
+        library = item.get("library")
+        if library:
+            line += f" [{library}]"
         raw_name = item.get("raw_name")
         if raw_name and raw_name != name:
             line += f" (raw: {raw_name})"
@@ -402,24 +450,6 @@ def _render_strings_text(value: Any) -> str:
     return "\n".join(lines)
 
 
-def _render_data_text(value: Any) -> str:
-    if not isinstance(value, list):
-        return _render_fallback_text(value)
-    if not value:
-        return "none"
-
-    lines = []
-    for item in value:
-        if not isinstance(item, dict):
-            lines.append(_render_fallback_text(item))
-            continue
-        address = item.get("address", "<unknown>")
-        name = item.get("name") or "<anonymous>"
-        type_name = item.get("type") or "<unknown>"
-        lines.append(f"{address}  {name}  {type_name}")
-    return "\n".join(lines)
-
-
 def _render_doctor_text(value: Any) -> str:
     if not isinstance(value, dict):
         return _render_fallback_text(value)
@@ -469,7 +499,8 @@ def _format_operation_result(item: dict[str, Any]) -> str:
     if op == "set_prototype":
         return f"set_prototype {item.get('function', '<unknown>')} @ {item.get('address', '<unknown>')}"
     if op in {"local_rename", "local_retype"}:
-        return f"{op} {item.get('function', '<unknown>')}::{item.get('variable', '<unknown>')}"
+        target = item.get("local_id") or item.get("variable", "<unknown>")
+        return f"{op} {item.get('function', '<unknown>')}::{target}"
     if op == "struct_field_set":
         return (
             f"struct_field_set {item.get('struct_name', '<unknown>')} "
@@ -482,21 +513,12 @@ def _format_operation_result(item: dict[str, Any]) -> str:
         )
     if op == "struct_field_delete":
         return f"struct_field_delete {item.get('struct_name', '<unknown>')}::{item.get('field_name', '<unknown>')}"
-    if op == "struct_replace":
-        type_names = ", ".join(sorted((item.get("defined_types") or {}).keys())) or "<none>"
-        return (
-            f"struct_replace {type_names}"
-            f" (parsed functions={item.get('parsed_function_count', len(item.get('parsed_functions') or []))},"
-            f" variables={item.get('parsed_variable_count', len(item.get('parsed_variables') or []))})"
-        )
     if op == "types_declare":
         return (
             f"types_declare {item.get('count', 0)} types"
             f" (parsed functions={item.get('parsed_function_count', len(item.get('parsed_functions') or []))},"
             f" variables={item.get('parsed_variable_count', len(item.get('parsed_variables') or []))})"
         )
-    if op == "patch_bytes":
-        return f"patch_bytes {item.get('address', '<unknown>')} {item.get('patched', '<unknown>')}"
     return _render_fallback_text(item)
 
 
@@ -585,6 +607,10 @@ def _render_py_exec_text(value: Any) -> str:
         prefix = "result:\n" if parts else "result:\n"
         parts.append(prefix + body)
 
+    warnings = list(value.get("warnings") or [])
+    if warnings:
+        parts.append("warnings:\n" + "\n".join(f"- {warning}" for warning in warnings))
+
     artifact = value.get("artifact")
     if isinstance(artifact, dict) and artifact.get("artifact_path"):
         parts.append(f"artifact: {artifact['artifact_path']}")
@@ -624,7 +650,7 @@ def _doctor(args: argparse.Namespace) -> int:
         "plugin_install_dir": str(plugin_install_dir()),
         "instances": instances,
     }
-    if args.format in {"text", "md"}:
+    if args.format == "text":
         result = _render_doctor_text(result)
     _render_result(result, fmt=args.format, out_path=args.out, stem="doctor")
     return 0
@@ -879,20 +905,6 @@ def _imports(args: argparse.Namespace) -> int:
     )
 
 
-def _data(args: argparse.Namespace) -> int:
-    return _call(
-        args,
-        "data",
-        {"offset": args.offset, "limit": args.limit},
-        require_target=True,
-        text_renderer=_render_data_text,
-        page_limit=args.limit,
-        page_offset=args.offset,
-        page_label="data",
-        stem="data",
-    )
-
-
 def _bundle_function(args: argparse.Namespace) -> int:
     return _call(
         args,
@@ -901,22 +913,7 @@ def _bundle_function(args: argparse.Namespace) -> int:
         require_target=True,
         allow_implicit_target=True,
         stem="function-bundle",
-    )
-
-
-def _bundle_corpus(args: argparse.Namespace) -> int:
-    return _call(
-        args,
-        "bundle_corpus",
-        {
-            "kind": args.kind,
-            "query": args.query,
-            "limit": args.limit,
-            "out_path": str(args.out) if args.out else None,
-        },
-        require_target=True,
-        allow_implicit_target=True,
-        stem="corpus-bundle",
+        bridge_writes_output=bool(args.out),
     )
 
 
@@ -933,7 +930,7 @@ def _py_exec(args: argparse.Namespace) -> int:
     return _call(
         args,
         "py_exec",
-        {"script": script, "out_path": str(args.out) if args.out else None},
+        {"script": script},
         require_target=True,
         allow_implicit_target=True,
         text_renderer=_render_py_exec_text,
@@ -1023,6 +1020,28 @@ def _proto_set(args: argparse.Namespace) -> int:
         text_renderer=_render_mutation_text,
         stem="prototype-set",
         result_exit_code=_mutation_exit_code,
+    )
+
+
+def _proto_get(args: argparse.Namespace) -> int:
+    return _call(
+        args,
+        "get_prototype",
+        {"identifier": args.identifier},
+        require_target=True,
+        text_renderer=_render_proto_text,
+        stem="prototype-get",
+    )
+
+
+def _local_list(args: argparse.Namespace) -> int:
+    return _call(
+        args,
+        "list_locals",
+        {"identifier": args.function},
+        require_target=True,
+        text_renderer=_render_local_list_text,
+        stem="local-list",
     )
 
 
@@ -1131,39 +1150,6 @@ def _struct_field_delete(args: argparse.Namespace) -> int:
     )
 
 
-def _struct_replace(args: argparse.Namespace) -> int:
-    return _call(
-        args,
-        "struct_replace",
-        {
-            "declaration": args.declaration,
-            "preview": bool(args.preview),
-        },
-        require_target=True,
-        allow_implicit_target=True,
-        text_renderer=_render_mutation_text,
-        stem="struct-replace",
-        result_exit_code=_mutation_exit_code,
-    )
-
-
-def _patch_bytes(args: argparse.Namespace) -> int:
-    return _call(
-        args,
-        "patch_bytes",
-        {
-            "address": args.address,
-            "data": args.data,
-            "preview": bool(args.preview),
-        },
-        require_target=True,
-        allow_implicit_target=True,
-        text_renderer=_render_mutation_text,
-        stem="patch-bytes",
-        result_exit_code=_mutation_exit_code,
-    )
-
-
 def _batch_apply(args: argparse.Namespace) -> int:
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     if args.preview:
@@ -1237,7 +1223,7 @@ def build_parser() -> argparse.ArgumentParser:
     function_info.add_argument("identifier")
     function_info.set_defaults(handler=_function_info)
 
-    decompile = subparsers.add_parser("decompile", help="Decompile a function")
+    decompile = subparsers.add_parser("decompile", help="Render HLIL-style decompile text for a function")
     _common_io_options(decompile)
     _target_option(decompile, required=False, default="active")
     decompile.add_argument("identifier")
@@ -1297,12 +1283,6 @@ def build_parser() -> argparse.ArgumentParser:
     _target_option(imports, required=False, default="active")
     imports.set_defaults(handler=_imports)
 
-    data = subparsers.add_parser("data", help="List defined data")
-    _common_io_options(data)
-    _target_option(data, required=False, default="active")
-    _add_paged_args(data)
-    data.set_defaults(handler=_data)
-
     bundle = subparsers.add_parser("bundle", help="Export reusable bundles")
     bundle_sub = bundle.add_subparsers(dest="bundle_command")
     bundle_function = bundle_sub.add_parser("function", help="Export a function bundle")
@@ -1310,13 +1290,6 @@ def build_parser() -> argparse.ArgumentParser:
     _target_option(bundle_function, required=False)
     bundle_function.add_argument("identifier")
     bundle_function.set_defaults(handler=_bundle_function)
-    bundle_corpus = bundle_sub.add_parser("corpus", help="Export a corpus bundle")
-    _common_io_options(bundle_corpus)
-    _target_option(bundle_corpus, required=False)
-    bundle_corpus.add_argument("--kind", choices=("functions", "types", "strings"), required=True)
-    bundle_corpus.add_argument("--query")
-    bundle_corpus.add_argument("--limit", type=int, default=500)
-    bundle_corpus.set_defaults(handler=_bundle_corpus)
 
     py = subparsers.add_parser("py", help="Execute Python inside Binary Ninja")
     py_sub = py.add_subparsers(dest="py_command")
@@ -1364,8 +1337,13 @@ def build_parser() -> argparse.ArgumentParser:
     comment_delete.add_argument("--function")
     comment_delete.set_defaults(handler=_comment_delete)
 
-    proto = subparsers.add_parser("proto", help="Set a user prototype")
+    proto = subparsers.add_parser("proto", help="Inspect or set a user prototype")
     proto_sub = proto.add_subparsers(dest="proto_command")
+    proto_get = proto_sub.add_parser("get", help="Show the current prototype")
+    _common_io_options(proto_get)
+    _target_option(proto_get, required=False, default="active")
+    proto_get.add_argument("identifier")
+    proto_get.set_defaults(handler=_proto_get)
     proto_set = proto_sub.add_parser("set", help="Set a prototype")
     _common_io_options(proto_set)
     _target_option(proto_set, required=False)
@@ -1374,14 +1352,19 @@ def build_parser() -> argparse.ArgumentParser:
     proto_set.add_argument("prototype")
     proto_set.set_defaults(handler=_proto_set)
 
-    local = subparsers.add_parser("local", help="Rename or retype locals")
+    local = subparsers.add_parser("local", help="Inspect, rename, or retype locals")
     local_sub = local.add_subparsers(dest="local_command")
+    local_list = local_sub.add_parser("list", help="List locals with stable IDs")
+    _common_io_options(local_list)
+    _target_option(local_list, required=False, default="active")
+    local_list.add_argument("function")
+    local_list.set_defaults(handler=_local_list)
     local_rename = local_sub.add_parser("rename", help="Rename a local")
     _common_io_options(local_rename)
     _target_option(local_rename, required=False)
     local_rename.add_argument("--preview", action="store_true")
     local_rename.add_argument("function")
-    local_rename.add_argument("variable")
+    local_rename.add_argument("variable", help="Stable local_id or legacy variable name")
     local_rename.add_argument("new_name")
     local_rename.set_defaults(handler=_local_rename)
     local_retype = local_sub.add_parser("retype", help="Retype a local")
@@ -1389,7 +1372,7 @@ def build_parser() -> argparse.ArgumentParser:
     _target_option(local_retype, required=False)
     local_retype.add_argument("--preview", action="store_true")
     local_retype.add_argument("function")
-    local_retype.add_argument("variable")
+    local_retype.add_argument("variable", help="Stable local_id or legacy variable name")
     local_retype.add_argument("new_type")
     local_retype.set_defaults(handler=_local_retype)
 
@@ -1427,23 +1410,6 @@ def build_parser() -> argparse.ArgumentParser:
     field_delete.add_argument("struct_name")
     field_delete.add_argument("field_name")
     field_delete.set_defaults(handler=_struct_field_delete)
-    struct_replace = struct_sub.add_parser("replace", help="Whole-struct replacement escape hatch")
-    _common_io_options(struct_replace)
-    _target_option(struct_replace, required=False)
-    struct_replace.add_argument("--preview", action="store_true")
-    struct_replace.add_argument("declaration")
-    struct_replace.set_defaults(handler=_struct_replace)
-
-    patch = subparsers.add_parser("patch", help="Patch raw bytes")
-    patch_sub = patch.add_subparsers(dest="patch_command")
-    patch_bytes = patch_sub.add_parser("bytes", help="Patch bytes at an address")
-    _common_io_options(patch_bytes)
-    _target_option(patch_bytes, required=False)
-    patch_bytes.add_argument("--preview", action="store_true")
-    patch_bytes.add_argument("address")
-    patch_bytes.add_argument("data")
-    patch_bytes.set_defaults(handler=_patch_bytes)
-
     batch = subparsers.add_parser("batch", help="Apply a batch manifest")
     batch_sub = batch.add_subparsers(dest="batch_command")
     batch_apply = batch_sub.add_parser("apply", help="Apply a JSON manifest")

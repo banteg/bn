@@ -81,7 +81,6 @@ Every command supports:
 
 - `--format json`
 - `--format text`
-- `--format md`
 - `--format ndjson`
 - `--out <path>`
 
@@ -94,6 +93,8 @@ bn decompile sample_track_floor_height_at_position --out /tmp/floor.json
 
 If `--out` is set, the command writes the rendered result to that path and prints a compact JSON envelope with the artifact path, size, hash, and summary.
 
+The only exception is `bn bundle function`, which writes the bundle artifact from inside the bridge and prints the envelope back to the CLI.
+
 ## Extraction Commands
 
 Common read-only commands:
@@ -105,6 +106,8 @@ bn target info
 bn function list
 bn function search attachment
 bn function info end_track_attachment_follow_state
+bn proto get end_track_attachment_follow_state
+bn local list end_track_attachment_follow_state
 bn refresh
 
 bn decompile end_track_attachment_follow_state
@@ -120,7 +123,6 @@ bn struct show Player --format text
 bn types declare --file /path/to/win32_min.h --preview
 bn strings --query follow
 bn imports
-bn data
 ```
 
 ## Typing Caveat
@@ -132,13 +134,15 @@ One local tooling caveat remains:
 
 ## Bundles And Python
 
+`bn decompile` is the HLIL-text convenience lane. It is useful for quick function reading, but typed layouts remain authoritative in `bn types show` and `bn struct show`.
+
 Export a reusable function bundle:
 
 ```bash
 bn bundle function end_track_attachment_follow_state --out /tmp/end_track_attachment_follow_state.json
 ```
 
-Run Python inside the Binary Ninja process:
+Run Python inside the Binary Ninja process. This is a first-class workflow for one-off inspection and BN-native scripting, not just a fallback:
 
 ```bash
 bn py exec --code "print(hex(bv.entry_point)); result = {'functions': len(list(bv.functions))}"
@@ -156,7 +160,7 @@ The `py exec` environment includes:
 - `bv`
 - `result`
 
-Stdout and `result` are both returned.
+Stdout and `result` are both returned. If `result` is not JSON-serializable, `bn` returns `repr(result)` and includes a warning instead of silently stringifying the whole response.
 
 ## Mutation Commands
 
@@ -167,12 +171,14 @@ Examples:
 ```bash
 bn symbol rename sub_401000 player_update --preview
 bn comment set --address 0x401000 "interesting branch" --preview
+bn comment get --address 0x401000
+bn proto get sub_401000
 bn proto set sub_401000 "int __cdecl player_update(Player* self)" --preview
-bn local rename sub_401000 var_14 speed --preview
-bn local retype sub_401000 var_14 float --preview
+bn local list sub_401000
+bn local rename sub_401000 0x401000:local:StackVariableSourceType:-20:2:12345 speed --preview
+bn local retype sub_401000 0x401000:local:StackVariableSourceType:-20:2:12345 float --preview
 bn types declare "typedef struct Player { int hp; } Player;" --preview
 bn struct field set Player 0x308 movement_flag_selector uint32_t --preview
-bn patch bytes 0x401000 "90 90" --preview
 ```
 
 Preview mode applies the change, refreshes analysis, captures affected decompile diffs, and then reverts the mutation.
@@ -195,6 +201,8 @@ When verification fails, JSON output also includes `requested` and `observed` st
 `bn types declare` now uses Binary Ninja's source parser when available. When you pass `--file`, the CLI also forwards the source path so relative includes resolve the same way they would during header import in the GUI.
 
 If a declaration only parses functions or extern variables and introduces no named types to persist, `types declare` returns a verified no-op instead of failing with `No named types found in declaration`.
+
+`bn local list` and `bn function info` return stable `local_id` values for parameters and locals. Prefer those IDs for `bn local rename`, `bn local retype`, and batch manifests; legacy name-based targeting still works for compatibility.
 
 ## Batch Manifests
 

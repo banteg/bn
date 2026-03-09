@@ -7,7 +7,6 @@ import hashlib
 import io
 import json
 import os
-import re
 import socketserver
 import threading
 import traceback
@@ -21,6 +20,8 @@ import binaryninja as bn
 from binaryninja.mainthread import execute_on_main_thread_and_wait, is_main_thread
 from binaryninja.plugin import PluginCommand
 
+from .paths import PLUGIN_NAME, bridge_registry_path, bridge_socket_path
+
 try:
     import binaryninjaui as ui
 except ImportError:  # pragma: no cover - GUI plugin only
@@ -28,22 +29,6 @@ except ImportError:  # pragma: no cover - GUI plugin only
 
 
 VERSION = "0.1.0"
-PLUGIN_NAME = "bn_agent_bridge"
-
-
-def _cache_home() -> Path:
-    base = os.environ.get("BN_CACHE_DIR")
-    if base:
-        return Path(base).expanduser()
-    return Path.home() / "Library" / "Caches" / "bn"
-
-
-def _registry_path() -> Path:
-    return _cache_home() / f"{PLUGIN_NAME}.json"
-
-
-def _socket_path() -> Path:
-    return _cache_home() / f"{PLUGIN_NAME}.sock"
 
 
 def _json_response(*, ok: bool, result: Any = None, error: str | None = None) -> dict[str, Any]:
@@ -102,7 +87,9 @@ class _ReadWriteLock:
 
 READ_LOCKED_OPS = {
     "function_info",
+    "get_prototype",
     "list_functions",
+    "list_locals",
     "search_functions",
     "decompile",
     "il",
@@ -113,9 +100,7 @@ READ_LOCKED_OPS = {
     "type_info",
     "strings",
     "imports",
-    "data",
     "bundle_function",
-    "bundle_corpus",
     "get_comment",
 }
 
@@ -131,9 +116,7 @@ WRITE_LOCKED_OPS = {
     "struct_field_set",
     "struct_field_rename",
     "struct_field_delete",
-    "struct_replace",
     "types_declare",
-    "patch_bytes",
     "batch_apply",
     "refresh",
 }
@@ -170,14 +153,17 @@ def _parse_address(value: Any) -> int:
     return int(text, 10)
 
 
-def _clean_bytes(text: str) -> bytes:
-    cleaned = re.sub(r"[^0-9a-fA-F]", "", text)
-    if len(cleaned) % 2:
-        raise ValueError("Hex byte string must have an even number of nybbles")
-    return bytes.fromhex(cleaned)
+def _artifact_summary(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return {"kind": "object", "keys": sorted(value.keys())[:10], "count": len(value)}
+    if isinstance(value, list):
+        return {"kind": "array", "count": len(value)}
+    if isinstance(value, str):
+        return {"kind": "string", "chars": len(value)}
+    return {"kind": type(value).__name__}
 
 
-def _write_text_artifact(path_text: str | None, payload: Any) -> dict[str, Any] | None:
+def _write_json_artifact(path_text: str | None, payload: Any) -> dict[str, Any] | None:
     if not path_text:
         return None
 
@@ -186,9 +172,12 @@ def _write_text_artifact(path_text: str | None, payload: Any) -> dict[str, Any] 
     data = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
     path.write_bytes(data)
     return {
+        "ok": True,
         "artifact_path": str(path),
+        "format": "json",
         "bytes": len(data),
         "sha256": hashlib.sha256(data).hexdigest(),
+        "summary": _artifact_summary(payload),
     }
 
 
@@ -445,8 +434,8 @@ class ThreadedUnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamSer
 class BinaryNinjaBridge:
     def __init__(self):
         self.targets = TargetManager()
-        self.socket_path = _socket_path()
-        self.registry_path = _registry_path()
+        self.socket_path = bridge_socket_path()
+        self.registry_path = bridge_registry_path()
         self._server: ThreadedUnixServer | None = None
         self._thread: threading.Thread | None = None
         self._target_lock = _ReadWriteLock()
@@ -522,6 +511,10 @@ class BinaryNinjaBridge:
             )
         if op == "function_info":
             return self._function_info(target, params["identifier"])
+        if op == "get_prototype":
+            return self._get_prototype(target, params["identifier"])
+        if op == "list_locals":
+            return self._list_locals_for_function(target, params["identifier"])
         if op == "decompile":
             return self._decompile(target, params["identifier"])
         if op == "il":
@@ -554,24 +547,10 @@ class BinaryNinjaBridge:
             )
         if op == "imports":
             return self._imports(target)
-        if op == "data":
-            return self._data(
-                target,
-                offset=int(params.get("offset", 0)),
-                limit=int(params.get("limit", 100)),
-            )
         if op == "bundle_function":
             return self._bundle_function(target, params["identifier"], params.get("out_path"))
-        if op == "bundle_corpus":
-            return self._bundle_corpus(
-                target,
-                str(params["kind"]),
-                query=params.get("query"),
-                limit=int(params.get("limit", 500)),
-                out_path=params.get("out_path"),
-            )
         if op == "py_exec":
-            return self._py_exec(target, str(params["script"]), params.get("out_path"))
+            return self._py_exec(target, str(params["script"]))
 
         if op == "rename_symbol":
             return self._mutation(target, bool(params.get("preview")), [params])
@@ -593,12 +572,8 @@ class BinaryNinjaBridge:
             return self._mutation(target, bool(params.get("preview")), [{"op": "struct_field_rename", **params}])
         if op == "struct_field_delete":
             return self._mutation(target, bool(params.get("preview")), [{"op": "struct_field_delete", **params}])
-        if op == "struct_replace":
-            return self._mutation(target, bool(params.get("preview")), [{"op": "struct_replace", **params}])
         if op == "types_declare":
             return self._mutation(target, bool(params.get("preview")), [{"op": "types_declare", **params}])
-        if op == "patch_bytes":
-            return self._mutation(target, bool(params.get("preview")), [{"op": "patch_bytes", **params}])
         if op == "batch_apply":
             manifest = dict(params)
             preview = bool(manifest.get("preview"))
@@ -839,6 +814,47 @@ class BinaryNinjaBridge:
                     return var, marker
         raise RuntimeError(f"Variable not found at storage {storage}")
 
+    def _variable_source_name(self, var) -> str:
+        source_type = getattr(var, "source_type", None)
+        if source_type is None:
+            return "unknown"
+        return str(getattr(source_type, "name", source_type))
+
+    def _variable_identifier(self, var) -> int | None:
+        try:
+            return int(getattr(var, "identifier"))
+        except Exception:
+            return None
+
+    def _local_id(self, func, var, *, is_parameter: bool) -> str:
+        role = "param" if is_parameter else "local"
+        storage = int(getattr(var, "storage", 0))
+        index = int(getattr(var, "index", 0))
+        identifier = self._variable_identifier(var)
+        source_name = self._variable_source_name(var)
+        return ":".join(
+            [
+                hex(int(func.start)),
+                role,
+                source_name,
+                str(storage),
+                str(index),
+                str(identifier if identifier is not None else "none"),
+            ]
+        )
+
+    def _variable_entry(self, func, var, *, is_parameter: bool) -> dict[str, Any]:
+        return {
+            "name": str(var.name),
+            "storage": int(var.storage),
+            "type": str(var.type),
+            "is_parameter": is_parameter,
+            "index": int(getattr(var, "index", 0)),
+            "identifier": self._variable_identifier(var),
+            "source_type": self._variable_source_name(var),
+            "local_id": self._local_id(func, var, is_parameter=is_parameter),
+        }
+
     def _function_text(self, bv, func, *, view: str = "hlil", ssa: bool = False) -> str:
         il_name = {"hlil": "hlil", "mlil": "mlil", "llil": "llil"}.get(view, "hlil")
         try:
@@ -868,24 +884,80 @@ class BinaryNinjaBridge:
                 addr += length
         return "\n".join(lines)
 
+    def _sort_variable_entries(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return sorted(
+            items,
+            key=lambda item: (
+                0 if item.get("is_parameter") else 1,
+                str(item.get("source_type", "")),
+                int(item.get("storage", 0)),
+                int(item.get("identifier") or 0),
+                str(item.get("name", "")),
+            ),
+        )
+
     def _list_locals(self, func) -> list[dict[str, Any]]:
         variables = []
-        seen: set[tuple[str, int]] = set()
+        seen: set[tuple[int | None, int, bool]] = set()
         for collection, is_parameter in ((func.parameter_vars, True), (func.stack_layout, False)):
             for var in list(collection):
-                marker = (str(var.name), int(var.storage))
+                marker = (self._variable_identifier(var), int(var.storage), is_parameter)
                 if marker in seen:
                     continue
                 seen.add(marker)
-                variables.append(
-                    {
-                        "name": var.name,
-                        "storage": int(var.storage),
-                        "type": str(var.type),
-                        "is_parameter": is_parameter,
-                    }
-                )
-        return variables
+                variables.append(self._variable_entry(func, var, is_parameter=is_parameter))
+        return self._sort_variable_entries(variables)
+
+    def _find_variables_by_name(self, func, name: str) -> list[tuple[Any, bool]]:
+        matches = []
+        for collection, is_parameter in ((func.parameter_vars, True), (func.stack_layout, False)):
+            for var in list(collection):
+                if str(var.name) == name:
+                    matches.append((var, is_parameter))
+        return matches
+
+    def _find_variable_selector(self, func, selector: str) -> tuple[Any, bool]:
+        locals_by_id: dict[str, tuple[Any, bool]] = {}
+        for collection, is_parameter in ((func.parameter_vars, True), (func.stack_layout, False)):
+            for var in list(collection):
+                locals_by_id[self._local_id(func, var, is_parameter=is_parameter)] = (var, is_parameter)
+        if selector in locals_by_id:
+            return locals_by_id[selector]
+
+        matches = self._find_variables_by_name(func, selector)
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise RuntimeError(f"Ambiguous variable selector: {selector}")
+        raise RuntimeError(f"Variable not found: {selector}")
+
+    def _function_size(self, func) -> int | None:
+        try:
+            total = getattr(func, "total_bytes", None)
+            if total is not None:
+                return int(total)
+        except Exception:
+            pass
+        try:
+            end = max(int(block.end) for block in list(func.basic_blocks))
+            return end - int(func.start)
+        except Exception:
+            return None
+
+    def _function_metadata(self, func) -> dict[str, Any]:
+        func_type = getattr(func, "type", None)
+        calling_convention = getattr(func, "calling_convention", None)
+        if calling_convention is None and func_type is not None:
+            calling_convention = getattr(func_type, "calling_convention", None)
+        return_type = getattr(func, "return_type", None)
+        if return_type is None and func_type is not None:
+            return_type = getattr(func_type, "return_value", None)
+        return {
+            "prototype": str(func_type),
+            "return_type": str(return_type) if return_type is not None else None,
+            "calling_convention": str(calling_convention) if calling_convention is not None else None,
+            "size": self._function_size(func),
+        }
 
     def _comment_map(self, bv, func) -> dict[str, str]:
         comments: dict[str, str] = {}
@@ -901,14 +973,14 @@ class BinaryNinjaBridge:
     def _xrefs_to_address(self, bv, address: int) -> dict[str, Any]:
         code_refs = []
         data_refs = []
-        for ref in list(bv.get_code_refs(address)):
+        for ref in sorted(list(bv.get_code_refs(address)), key=lambda item: int(item.address)):
             code_refs.append(
                 {
                     "function": ref.function.name if getattr(ref, "function", None) else None,
                     "address": hex(ref.address),
                 }
             )
-        for ref_addr in list(bv.get_data_refs(address)):
+        for ref_addr in sorted(list(bv.get_data_refs(address))):
             functions = self._functions_containing(bv, ref_addr)
             data_refs.append(
                 {
@@ -920,10 +992,13 @@ class BinaryNinjaBridge:
 
     def _list_functions(self, selector: str | None, offset: int, limit: int):
         bv = self._resolve_view(selector)
-        items = [
-            {"name": fn.name, "address": hex(fn.start), "raw_name": getattr(fn, "raw_name", fn.name)}
-            for fn in list(bv.functions)
-        ]
+        items = sorted(
+            [
+                {"name": fn.name, "address": hex(fn.start), "raw_name": getattr(fn, "raw_name", fn.name)}
+                for fn in list(bv.functions)
+            ],
+            key=lambda item: (int(item["address"], 16), item["name"]),
+        )
         return items[offset : offset + limit]
 
     def _search_functions(self, selector: str | None, query: str, offset: int, limit: int):
@@ -933,6 +1008,7 @@ class BinaryNinjaBridge:
         for fn in list(bv.functions):
             if needle in fn.name.lower():
                 items.append({"name": fn.name, "address": hex(fn.start)})
+        items.sort(key=lambda item: (int(item["address"], 16), item["name"]))
         return items[offset : offset + limit]
 
     def _decompile(self, selector: str | None, identifier):
@@ -949,6 +1025,7 @@ class BinaryNinjaBridge:
     def _function_info(self, selector: str | None, identifier):
         bv = self._resolve_view(selector)
         func = self._find_function(bv, identifier)
+        metadata = self._function_metadata(func)
         variables = self._list_locals(func)
         parameters = [item for item in variables if item["is_parameter"]]
         locals_only = [item for item in variables if not item["is_parameter"]]
@@ -958,10 +1035,35 @@ class BinaryNinjaBridge:
                 "address": hex(func.start),
                 "raw_name": getattr(func, "raw_name", func.name),
             },
-            "prototype": str(func.type),
+            **metadata,
             "parameters": parameters,
             "locals": locals_only,
             "stack_vars": locals_only,
+        }
+
+    def _get_prototype(self, selector: str | None, identifier):
+        bv = self._resolve_view(selector)
+        func = self._find_function(bv, identifier)
+        return {
+            "function": {
+                "name": func.name,
+                "address": hex(func.start),
+                "raw_name": getattr(func, "raw_name", func.name),
+            },
+            **self._function_metadata(func),
+        }
+
+    def _list_locals_for_function(self, selector: str | None, identifier):
+        bv = self._resolve_view(selector)
+        func = self._find_function(bv, identifier)
+        variables = self._list_locals(func)
+        return {
+            "function": {
+                "name": func.name,
+                "address": hex(func.start),
+                "raw_name": getattr(func, "raw_name", func.name),
+            },
+            "locals": variables,
         }
 
     def _il(self, selector: str | None, identifier, view: str, ssa: bool):
@@ -1019,7 +1121,10 @@ class BinaryNinjaBridge:
         field = self._resolve_type_field(bv, field_spec)
 
         code_refs = []
-        for ref in bv.get_code_refs_for_type_field(field["type_name"], field["offset"]):
+        for ref in sorted(
+            list(bv.get_code_refs_for_type_field(field["type_name"], field["offset"])),
+            key=lambda item: int(getattr(item, "address", 0)),
+        ):
             func = getattr(ref, "func", None)
             address = int(getattr(ref, "address", 0))
             code_refs.append(
@@ -1033,7 +1138,7 @@ class BinaryNinjaBridge:
             )
 
         data_refs = []
-        for address in list(bv.get_data_refs_for_type_field(field["type_name"], field["offset"])):
+        for address in sorted(list(bv.get_data_refs_for_type_field(field["type_name"], field["offset"]))):
             symbol = bv.get_symbol_at(address)
             type_obj = bv.get_type_at(address)
             data_refs.append(
@@ -1059,6 +1164,7 @@ class BinaryNinjaBridge:
             if needle and needle not in entry["name"].lower() and needle not in entry["decl"].lower():
                 continue
             items.append(entry)
+        items.sort(key=lambda item: item["name"].lower())
         return items[offset : offset + limit]
 
     def _find_type(self, bv, type_name: str):
@@ -1103,13 +1209,21 @@ class BinaryNinjaBridge:
             if needle and needle not in value.lower():
                 continue
             items.append(entry)
+        items.sort(key=lambda item: (int(item["address"], 16), item["value"]))
         return items[offset : offset + limit]
 
     def _imports(self, selector: str | None):
         bv = self._resolve_view(selector)
         items = []
         for sym in list(bv.get_symbols_of_type(bn.SymbolType.ImportedFunctionSymbol)):
-            items.append({"name": sym.name, "address": hex(sym.address)})
+            items.append(
+                {
+                    "name": sym.name,
+                    "address": hex(sym.address),
+                    "library": str(getattr(sym, "namespace", "") or ""),
+                }
+            )
+        items.sort(key=lambda item: (item["library"], item["name"], int(item["address"], 16)))
         return items
 
     def _get_comment(self, selector: str | None, address, function):
@@ -1135,21 +1249,6 @@ class BinaryNinjaBridge:
             "has_comment": bool(comment),
         }
 
-    def _data(self, selector: str | None, *, offset: int, limit: int):
-        bv = self._resolve_view(selector)
-        items = []
-        for addr in list(bv.data_vars):
-            symbol = bv.get_symbol_at(addr)
-            type_obj = bv.get_type_at(addr)
-            items.append(
-                {
-                    "address": hex(addr),
-                    "name": symbol.name if symbol else None,
-                    "type": str(type_obj) if type_obj is not None else None,
-                }
-            )
-        return items[offset : offset + limit]
-
     def _bundle_function(self, selector: str | None, identifier, out_path: str | None):
         bv = self._resolve_view(selector)
         func = self._find_function(bv, identifier)
@@ -1170,31 +1269,28 @@ class BinaryNinjaBridge:
             },
             "disassembly": self._disasm_text(bv, func),
             "locals": self._list_locals(func),
-            "comments": self._comment_map(bv, func),
+            "comments": dict(sorted(self._comment_map(bv, func).items())),
             "xrefs": self._xrefs_to_address(bv, func.start),
         }
-        artifact = _write_text_artifact(out_path, bundle)
-        if artifact:
-            bundle["artifact"] = artifact
-        return bundle
+        artifact = _write_json_artifact(out_path, bundle)
+        return artifact or bundle
 
-    def _bundle_corpus(self, selector: str | None, kind: str, *, query, limit: int, out_path: str | None):
-        if kind == "functions":
-            payload = self._list_functions(selector, 0, limit)
-        elif kind == "types":
-            payload = self._types(selector, query=query, offset=0, limit=limit)
-        elif kind == "strings":
-            payload = self._strings(selector, query=query, offset=0, limit=limit)
-        else:
-            raise ValueError(f"Unsupported corpus kind: {kind}")
+    def _normalize_py_result(self, value: Any) -> tuple[Any, list[str]]:
+        def normalize(item: Any) -> Any:
+            if item is None or isinstance(item, (bool, int, float, str)):
+                return item
+            if isinstance(item, (list, tuple)):
+                return [normalize(part) for part in item]
+            if isinstance(item, dict):
+                return {str(key): normalize(val) for key, val in item.items()}
+            raise TypeError(type(item).__name__)
 
-        result = {"kind": kind, "items": payload}
-        artifact = _write_text_artifact(out_path, result)
-        if artifact:
-            result["artifact"] = artifact
-        return result
+        try:
+            return normalize(value), []
+        except TypeError:
+            return repr(value), ["`result` was not JSON-serializable; returned repr(result) instead."]
 
-    def _py_exec(self, selector: str | None, script: str, out_path: str | None):
+    def _py_exec(self, selector: str | None, script: str):
         bv = self._resolve_view(selector)
         stdout = io.StringIO()
         scope = {
@@ -1205,13 +1301,12 @@ class BinaryNinjaBridge:
         }
         with contextlib.redirect_stdout(stdout):
             exec(script, scope, scope)
+        result_value, warnings = self._normalize_py_result(scope.get("result"))
         result = {
             "stdout": stdout.getvalue(),
-            "result": scope.get("result"),
+            "result": result_value,
+            "warnings": warnings,
         }
-        artifact = _write_text_artifact(out_path, result)
-        if artifact:
-            result["artifact"] = artifact
         return result
 
     def _render_warnings(self, text: str) -> list[str]:
@@ -1265,7 +1360,7 @@ class BinaryNinjaBridge:
         kind = op.get("op") or "rename_symbol"
         if kind.startswith("struct_") and op.get("struct_name"):
             return [str(op["struct_name"])]
-        if kind in {"struct_replace", "types_declare"}:
+        if kind == "types_declare":
             return [name for name, _ in self._parse_declaration_source(
                 bv,
                 str(op["declaration"]),
@@ -1290,8 +1385,6 @@ class BinaryNinjaBridge:
                         functions = [self._find_function(bv, op["function"])]
                     elif op.get("address"):
                         functions = self._functions_containing(bv, _parse_address(op["address"]))
-                elif kind == "patch_bytes":
-                    functions = self._functions_containing(bv, _parse_address(op["address"]))
                 elif kind.startswith("struct_") or kind == "types_declare":
                     for type_name in self._operation_type_names(bv, op):
                         functions.extend(self._guess_type_affected_functions(bv, type_name))
@@ -1479,13 +1572,6 @@ class BinaryNinjaBridge:
                     snippets_added += 1
         return diffs
 
-    def _find_variable(self, func, name: str):
-        for collection in (func.parameter_vars, func.stack_layout):
-            for var in list(collection):
-                if var.name == name:
-                    return var
-        raise RuntimeError(f"Variable not found: {name}")
-
     def _operation_requested(self, op: dict[str, Any]) -> dict[str, Any]:
         return {key: value for key, value in op.items() if key != "preview"}
 
@@ -1547,12 +1633,8 @@ class BinaryNinjaBridge:
                 return self._verify_struct_field_rename(bv, result)
             if op == "struct_field_delete":
                 return self._verify_struct_field_delete(bv, result)
-            if op == "struct_replace":
-                return self._verify_declared_types(bv, result)
             if op == "types_declare":
                 return self._verify_declared_types(bv, result)
-            if op == "patch_bytes":
-                return self._verify_patch_bytes(bv, result)
             raise OperationFailure("unsupported", f"Unsupported verification path: {op}", requested=result.get("requested"))
         except OperationFailure as exc:
             item = dict(result)
@@ -1821,23 +1903,6 @@ class BinaryNinjaBridge:
         item["status"] = "noop" if before and all(before.get(name) == expected for name, expected in defined_types.items()) else "verified"
         return item
 
-    def _verify_patch_bytes(self, bv, result: dict[str, Any]) -> dict[str, Any]:
-        item = dict(result)
-        address = _parse_address(item["address"])
-        expected = bytes.fromhex(item["patched"])
-        observed_bytes = bv.read(address, len(expected)) or b""
-        observed_hex = observed_bytes.hex()
-        item["observed"] = {"address": item["address"], "patched": observed_hex}
-        if observed_hex != item["patched"]:
-            raise OperationFailure(
-                "verification_failed",
-                f"Live patch verification failed at {item['address']}",
-                requested=item.get("requested"),
-                observed=item["observed"],
-            )
-        item["status"] = "noop" if item.get("original") == item["patched"] else "verified"
-        return item
-
     def _apply_operation(self, bv, op: dict[str, Any]):
         kind = op.get("op") or "rename_symbol"
         try:
@@ -1859,12 +1924,8 @@ class BinaryNinjaBridge:
                 return self._op_struct_field_rename(bv, op)
             if kind == "struct_field_delete":
                 return self._op_struct_field_delete(bv, op)
-            if kind == "struct_replace":
-                return self._op_struct_replace(bv, op)
             if kind == "types_declare":
                 return self._op_types_declare(bv, op)
-            if kind == "patch_bytes":
-                return self._op_patch_bytes(bv, op)
             raise OperationFailure("unsupported", f"Unsupported batch operation: {kind}", requested=self._operation_requested(op))
         except OperationFailure:
             raise
@@ -2034,7 +2095,7 @@ class BinaryNinjaBridge:
 
     def _op_local_rename(self, bv, op: dict[str, Any]):
         fn = self._find_function(bv, op["function"])
-        var = self._find_variable(fn, str(op["variable"]))
+        var, is_parameter = self._find_variable_selector(fn, str(op["variable"]))
         new_name = str(op["new_name"])
         if str(var.name) != new_name:
             fn.create_user_var(var, var.type, new_name)
@@ -2043,8 +2104,11 @@ class BinaryNinjaBridge:
             "function": fn.name,
             "address": hex(fn.start),
             "variable": str(op["variable"]),
+            "local_id": self._local_id(fn, var, is_parameter=is_parameter),
             "storage": int(var.storage),
-            "is_parameter": var in list(fn.parameter_vars),
+            "identifier": self._variable_identifier(var),
+            "source_type": self._variable_source_name(var),
+            "is_parameter": is_parameter,
             "before_name": str(var.name),
             "new_name": new_name,
             "requested": self._operation_requested(op),
@@ -2052,7 +2116,7 @@ class BinaryNinjaBridge:
 
     def _op_local_retype(self, bv, op: dict[str, Any]):
         fn = self._find_function(bv, op["function"])
-        var = self._find_variable(fn, str(op["variable"]))
+        var, is_parameter = self._find_variable_selector(fn, str(op["variable"]))
         expected_type, _ = bv.parse_type_string(str(op["new_type"]))
         if str(var.type) != str(expected_type):
             fn.create_user_var(var, expected_type, var.name)
@@ -2061,8 +2125,11 @@ class BinaryNinjaBridge:
             "function": fn.name,
             "address": hex(fn.start),
             "variable": str(op["variable"]),
+            "local_id": self._local_id(fn, var, is_parameter=is_parameter),
             "storage": int(var.storage),
-            "is_parameter": var in list(fn.parameter_vars),
+            "identifier": self._variable_identifier(var),
+            "source_type": self._variable_source_name(var),
+            "is_parameter": is_parameter,
             "before_type": str(var.type),
             "expected_type": str(expected_type),
             "requested": self._operation_requested(op),
@@ -2144,31 +2211,6 @@ class BinaryNinjaBridge:
             "requested": self._operation_requested(op),
         }
 
-    def _op_struct_replace(self, bv, op: dict[str, Any]):
-        parsed = self._parse_declaration_source(
-            bv,
-            str(op["declaration"]),
-            source_path=op.get("source_path"),
-        )
-        named_types = list(parsed["types"])
-        if not named_types:
-            raise OperationFailure("unsupported", "No named types found in declaration", requested=self._operation_requested(op))
-        defined_types = {}
-        before_defined_types = {}
-        for name, type_obj in named_types:
-            existing = bv.get_type_by_name(name)
-            before_defined_types[str(name)] = str(existing) if existing is not None else None
-            bv.define_user_type(name, type_obj)
-            defined_types[str(name)] = str(type_obj)
-        return {
-            "op": "struct_replace",
-            "defined_types": defined_types,
-            "before_defined_types": before_defined_types,
-            "parsed_functions": [name for name, _ in parsed["functions"]],
-            "parsed_variables": [name for name, _ in parsed["variables"]],
-            "requested": self._operation_requested(op),
-        }
-
     def _op_types_declare(self, bv, op: dict[str, Any]):
         parsed = self._parse_declaration_source(
             bv,
@@ -2195,22 +2237,6 @@ class BinaryNinjaBridge:
             "parsed_variable_count": len(parsed["variables"]),
             "requested": self._operation_requested(op),
         }
-
-    def _op_patch_bytes(self, bv, op: dict[str, Any]):
-        address = _parse_address(op["address"])
-        data = _clean_bytes(str(op["data"]))
-        original = bv.read(address, len(data))
-        written = bv.write(address, data)
-        if written != len(data):
-            raise RuntimeError(f"Patched {written} bytes but expected {len(data)}")
-        return {
-            "op": "patch_bytes",
-            "address": hex(address),
-            "original": original.hex() if original else None,
-            "patched": data.hex(),
-            "requested": self._operation_requested(op),
-        }
-
 
 _bridge: BinaryNinjaBridge | None = None
 

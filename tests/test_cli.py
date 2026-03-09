@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import bn.cli
+import pytest
 
 
 def test_function_list_defaults_to_active_target(monkeypatch, capsys):
@@ -61,8 +62,11 @@ def test_function_info_uses_active_target_and_text_renderer(monkeypatch, capsys)
             "result": {
                 "function": {"name": "sub_401000", "address": "0x401000"},
                 "prototype": "int32_t sub_401000(int32_t arg1)",
-                "parameters": [{"name": "arg1", "type": "int32_t", "storage": 0, "is_parameter": True}],
-                "locals": [{"name": "var_4", "type": "int32_t", "storage": -4, "is_parameter": False}],
+                "return_type": "int32_t",
+                "calling_convention": "__cdecl",
+                "size": 24,
+                "parameters": [{"name": "arg1", "type": "int32_t", "storage": 0, "is_parameter": True, "local_id": "0x401000:param:StackVariableSourceType:0:0:1"}],
+                "locals": [{"name": "var_4", "type": "int32_t", "storage": -4, "is_parameter": False, "local_id": "0x401000:local:StackVariableSourceType:-4:1:2"}],
                 "stack_vars": [{"name": "var_4", "type": "int32_t", "storage": -4, "is_parameter": False}],
             },
         }
@@ -76,8 +80,10 @@ def test_function_info_uses_active_target_and_text_renderer(monkeypatch, capsys)
     assert captured["target"] == "active"
     output = capsys.readouterr().out
     assert "sub_401000 @ 0x401000" in output
+    assert "calling convention: __cdecl" in output
     assert "parameters:" in output
     assert "locals:" in output
+    assert "id=0x401000:param:StackVariableSourceType:0:0:1" in output
 
 
 def test_symbol_rename_builds_preview_payload(monkeypatch):
@@ -411,6 +417,7 @@ def test_py_exec_accepts_inline_code(monkeypatch):
     assert captured["op"] == "py_exec"
     assert captured["target"] == "active"
     assert captured["params"]["script"] == "print('hi')"
+    assert "out_path" not in captured["params"]
 
 
 def test_py_exec_missing_script_mentions_code(capsys):
@@ -453,6 +460,7 @@ def test_py_exec_text_format_renders_stdout_and_result(monkeypatch, capsys):
             "result": {
                 "stdout": "hi\n",
                 "result": {"functions": 7},
+                "warnings": ["warning one"],
             },
         }
 
@@ -464,6 +472,109 @@ def test_py_exec_text_format_renders_stdout_and_result(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert output.startswith("hi\n\nresult:\n")
     assert '"functions": 7' in output
+    assert "warnings:" in output
+
+
+def test_proto_get_renders_prototype_text(monkeypatch, capsys):
+    def fake_send_request(op, *, params=None, target=None, timeout=30.0):
+        assert op == "get_prototype"
+        return {
+            "ok": True,
+            "result": {
+                "function": {"name": "sub_401000", "address": "0x401000"},
+                "prototype": "int32_t sub_401000(int32_t arg1)",
+                "return_type": "int32_t",
+                "calling_convention": "__cdecl",
+            },
+        }
+
+    monkeypatch.setattr(bn.cli, "send_request", fake_send_request)
+
+    rc = bn.cli.main(["proto", "get", "--format", "text", "sub_401000"])
+
+    assert rc == 0
+    assert capsys.readouterr().out == "int32_t sub_401000(int32_t arg1)\n"
+
+
+def test_local_list_renders_ids(monkeypatch, capsys):
+    def fake_send_request(op, *, params=None, target=None, timeout=30.0):
+        assert op == "list_locals"
+        return {
+            "ok": True,
+            "result": {
+                "function": {"name": "sub_401000", "address": "0x401000"},
+                "locals": [
+                    {
+                        "name": "arg1",
+                        "type": "int32_t",
+                        "storage": 4,
+                        "source_type": "StackVariableSourceType",
+                        "index": 0,
+                        "identifier": 1,
+                        "is_parameter": True,
+                        "local_id": "0x401000:param:StackVariableSourceType:4:0:1",
+                    }
+                ],
+            },
+        }
+
+    monkeypatch.setattr(bn.cli, "send_request", fake_send_request)
+
+    rc = bn.cli.main(["local", "list", "--format", "text", "sub_401000"])
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "locals:" in output
+    assert "id=0x401000:param:StackVariableSourceType:4:0:1" in output
+
+
+def test_bundle_function_out_path_is_bridge_owned(monkeypatch, tmp_path, capsys):
+    captured = {}
+    out_path = tmp_path / "bundle.json"
+
+    def fake_send_request(op, *, params=None, target=None, timeout=30.0):
+        if op == "list_targets":
+            return {
+                "ok": True,
+                "result": [{"target_id": "123:1:7", "selector": "SnailMail_unwrapped.exe.bndb"}],
+            }
+        captured["op"] = op
+        captured["params"] = params
+        return {
+            "ok": True,
+            "result": {
+                "ok": True,
+                "artifact_path": str(out_path),
+                "format": "json",
+                "bytes": 123,
+                "sha256": "deadbeef",
+                "summary": {"kind": "object", "count": 3},
+            },
+        }
+
+    monkeypatch.setattr(bn.cli, "send_request", fake_send_request)
+
+    rc = bn.cli.main(["bundle", "function", "--out", str(out_path), "sub_401000"])
+
+    assert rc == 0
+    assert captured["op"] == "bundle_function"
+    assert captured["params"]["out_path"] == str(out_path)
+    assert not out_path.exists()
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["artifact_path"] == str(out_path)
+
+
+def test_removed_experimental_commands_are_not_present():
+    parser = bn.cli.build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["data"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["bundle", "corpus"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["struct", "replace"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["patch", "bytes"])
 
 
 def test_symbol_rename_text_format_renders_mutation_summary(monkeypatch, capsys):

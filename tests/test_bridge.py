@@ -49,10 +49,15 @@ def _load_bridge(monkeypatch):
     monkeypatch.setitem(sys.modules, "binaryninja.mainthread", fake_mainthread)
     monkeypatch.setitem(sys.modules, "binaryninja.plugin", fake_plugin)
     monkeypatch.delitem(sys.modules, "binaryninjaui", raising=False)
-    module_name = "bn_test_bridge"
+    package_name = "bn_test_bridge"
+    module_name = f"{package_name}.bridge"
     monkeypatch.delitem(sys.modules, module_name, raising=False)
+    monkeypatch.delitem(sys.modules, package_name, raising=False)
 
     bridge_path = Path(__file__).resolve().parents[1] / "plugin" / "bn_agent_bridge" / "bridge.py"
+    package = types.ModuleType(package_name)
+    package.__path__ = [str(bridge_path.parent)]
+    monkeypatch.setitem(sys.modules, package_name, package)
     spec = importlib.util.spec_from_file_location(module_name, bridge_path)
     assert spec is not None
     assert spec.loader is not None
@@ -70,6 +75,28 @@ class _FakeFunction:
         self.type = type_text
         self.parameter_vars = []
         self.stack_layout = []
+        self.calling_convention = "__cdecl"
+        self.return_type = "int32_t"
+        self.basic_blocks = []
+
+
+class _FakeVariable:
+    def __init__(
+        self,
+        *,
+        name: str,
+        storage: int,
+        var_type: str,
+        identifier: int,
+        index: int = 0,
+        source_type: str = "StackVariableSourceType",
+    ):
+        self.name = name
+        self.storage = storage
+        self.type = var_type
+        self.identifier = identifier
+        self.index = index
+        self.source_type = types.SimpleNamespace(name=source_type)
 
 
 class _FakeBV:
@@ -294,6 +321,88 @@ def test_op_types_declare_accepts_source_without_named_types(monkeypatch):
     assert result["parsed_functions"] == ["DirectInput8Create"]
     assert result["parsed_variables"] == ["GUID_SysKeyboard"]
     assert bv.defined == []
+
+
+def test_list_locals_returns_stable_ids(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+    fn = _FakeFunction(0x401000, "player_update", "int32_t player_update(int32_t arg1)")
+    fn.parameter_vars = [
+        _FakeVariable(name="arg1", storage=4, var_type="int32_t", identifier=1001, index=0)
+    ]
+    fn.stack_layout = [
+        _FakeVariable(name="var_4", storage=-4, var_type="float", identifier=2001, index=1)
+    ]
+    bv = _FakeBV(functions=[fn])
+    monkeypatch.setattr(instance, "_resolve_view", lambda selector: bv)
+
+    result = instance._list_locals_for_function("active", "player_update")
+
+    assert result["function"]["name"] == "player_update"
+    assert len(result["locals"]) == 2
+    assert result["locals"][0]["local_id"].startswith("0x401000:param:")
+    assert result["locals"][1]["local_id"].startswith("0x401000:local:")
+
+
+def test_find_variable_selector_prefers_local_id(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+    fn = _FakeFunction(0x401000, "player_update")
+    shared = _FakeVariable(name="tmp", storage=-4, var_type="int32_t", identifier=2001)
+    duplicate = _FakeVariable(name="tmp", storage=-8, var_type="int32_t", identifier=2002)
+    fn.stack_layout = [shared, duplicate]
+
+    local_id = instance._local_id(fn, duplicate, is_parameter=False)
+    found, is_parameter = instance._find_variable_selector(fn, local_id)
+
+    assert found is duplicate
+    assert is_parameter is False
+
+
+def test_function_info_includes_metadata(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+    fn = _FakeFunction(0x401000, "player_update", "int32_t player_update(int32_t arg1)")
+    fn.parameter_vars = [
+        _FakeVariable(name="arg1", storage=4, var_type="int32_t", identifier=1001, index=0)
+    ]
+    bv = _FakeBV(functions=[fn])
+    monkeypatch.setattr(instance, "_resolve_view", lambda selector: bv)
+
+    result = instance._function_info("active", "player_update")
+
+    assert result["prototype"] == "int32_t player_update(int32_t arg1)"
+    assert result["return_type"] == "int32_t"
+    assert result["calling_convention"] == "__cdecl"
+    assert result["size"] is None
+
+
+def test_list_functions_is_sorted_by_address(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+    bv = _FakeBV(
+        functions=[
+            _FakeFunction(0x402000, "sub_402000"),
+            _FakeFunction(0x401000, "sub_401000"),
+        ]
+    )
+    monkeypatch.setattr(instance, "_resolve_view", lambda selector: bv)
+
+    result = instance._list_functions("active", 0, 10)
+
+    assert [item["address"] for item in result] == ["0x401000", "0x402000"]
+
+
+def test_py_exec_non_serializable_result_falls_back_to_repr(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+    bv = _FakeBV()
+    monkeypatch.setattr(instance, "_resolve_view", lambda selector: bv)
+
+    result = instance._py_exec("active", "result = object()")
+
+    assert isinstance(result["result"], str)
+    assert result["warnings"]
 
 
 def test_diff_snapshots_marks_name_only_changes(monkeypatch):

@@ -122,7 +122,8 @@ def send_request(
                 sock.settimeout(timeout)
                 sock.connect(str(instance.socket_path))
                 sock.sendall(encoded)
-                sock.shutdown(socket.SHUT_WR)
+                with contextlib.suppress(OSError):
+                    sock.shutdown(socket.SHUT_WR)
                 while True:
                     chunk = sock.recv(65536)
                     if not chunk:

@@ -29,3 +29,18 @@ def test_write_output_spills_large_payload(tmp_path, monkeypatch):
     envelope = json.loads(rendered)
     artifact_root = tempfile.gettempdir()
     assert envelope["artifact_path"].startswith(artifact_root)
+
+
+def test_write_output_spills_text_payload_with_txt_suffix(tmp_path, monkeypatch):
+    monkeypatch.setenv("BN_CACHE_DIR", str(tmp_path))
+
+    rendered = write_output(
+        "x" * 100_000,
+        fmt="text",
+        out_path=None,
+        stem="large-text",
+        spill_threshold=256,
+    )
+
+    envelope = json.loads(rendered)
+    assert envelope["artifact_path"].endswith(".txt")
