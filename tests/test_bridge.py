@@ -407,9 +407,53 @@ def test_list_functions_is_sorted_by_address(monkeypatch):
     )
     monkeypatch.setattr(instance, "_resolve_view", lambda selector: bv)
 
-    result = instance._list_functions("active", 0, 10)
+    result = instance._list_functions("active")
 
     assert [item["address"] for item in result] == ["0x401000", "0x402000"]
+
+
+def test_list_functions_can_filter_by_address_range(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+    bv = _FakeBV(
+        functions=[
+            _FakeFunction(0x401000, "sub_401000"),
+            _FakeFunction(0x402000, "sub_402000"),
+            _FakeFunction(0x403000, "sub_403000"),
+        ]
+    )
+    monkeypatch.setattr(instance, "_resolve_view", lambda selector: bv)
+
+    result = instance._list_functions("active", min_address="0x401800", max_address="0x402fff")
+
+    assert [item["address"] for item in result] == ["0x402000"]
+
+
+def test_search_functions_supports_regex(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+    bv = _FakeBV(
+        functions=[
+            _FakeFunction(0x401000, "load_attachment"),
+            _FakeFunction(0x402000, "detach_player"),
+            _FakeFunction(0x403000, "update_camera"),
+        ]
+    )
+    monkeypatch.setattr(instance, "_resolve_view", lambda selector: bv)
+
+    result = instance._search_functions("active", "attach|detach", regex=True)
+
+    assert [item["name"] for item in result] == ["load_attachment", "detach_player"]
+
+
+def test_search_functions_rejects_invalid_regex(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+    bv = _FakeBV(functions=[_FakeFunction(0x401000, "load_attachment")])
+    monkeypatch.setattr(instance, "_resolve_view", lambda selector: bv)
+
+    with pytest.raises(bridge.OperationFailure, match="Invalid function regex"):
+        instance._search_functions("active", "(", regex=True)
 
 
 def test_py_exec_non_serializable_result_falls_back_to_repr(monkeypatch):

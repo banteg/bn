@@ -20,23 +20,23 @@ def test_function_list_defaults_to_active_target(monkeypatch, capsys):
     rc = bn.cli.main(["function", "list"])
     assert rc == 0
     assert captured["op"] == "list_functions"
+    assert captured["params"] == {}
     assert captured["target"] == "active"
     output = capsys.readouterr().out
     assert output == "0x401000  sub_401000\n"
     assert '"name"' not in output
 
 
-def test_function_list_warns_on_truncation(monkeypatch, capsys):
+def test_function_list_returns_full_result_set(monkeypatch, capsys):
     captured = {}
 
     def fake_send_request(op, *, params=None, target=None, timeout=30.0):
         captured["op"] = op
         captured["params"] = params
         captured["target"] = target
-        assert params["limit"] == 101
         return {
             "ok": True,
-            "result": [{"name": f"sub_{index:06x}", "address": hex(index)} for index in range(101)],
+            "result": [{"name": f"sub_{index:06x}", "address": hex(index)} for index in range(150)],
         }
 
     monkeypatch.setattr(bn.cli, "send_request", fake_send_request)
@@ -45,11 +45,53 @@ def test_function_list_warns_on_truncation(monkeypatch, capsys):
 
     assert rc == 0
     assert captured["op"] == "list_functions"
+    assert captured["params"] == {}
     stdout, stderr = capsys.readouterr()
     payload = json.loads(stdout)
-    assert len(payload) == 100
-    assert "warning: function list output truncated to 100 items" in stderr
-    assert "--offset 100" in stderr
+    assert len(payload) == 150
+    assert stderr == ""
+
+
+def test_function_list_forwards_address_filters(monkeypatch, capsys):
+    captured = {}
+
+    def fake_send_request(op, *, params=None, target=None, timeout=30.0):
+        captured["op"] = op
+        captured["params"] = params
+        captured["target"] = target
+        return {"ok": True, "result": []}
+
+    monkeypatch.setattr(bn.cli, "send_request", fake_send_request)
+
+    rc = bn.cli.main(["function", "list", "--min-address", "0x401000", "--max-address", "0x402000"])
+
+    assert rc == 0
+    assert captured["op"] == "list_functions"
+    assert captured["params"]["min_address"] == "0x401000"
+    assert captured["params"]["max_address"] == "0x402000"
+    assert capsys.readouterr().out == "none\n"
+
+
+def test_function_search_can_request_regex_matching(monkeypatch, capsys):
+    captured = {}
+
+    def fake_send_request(op, *, params=None, target=None, timeout=30.0):
+        captured["op"] = op
+        captured["params"] = params
+        captured["target"] = target
+        return {"ok": True, "result": [{"name": "load_attachment", "address": "0x401000"}]}
+
+    monkeypatch.setattr(bn.cli, "send_request", fake_send_request)
+
+    rc = bn.cli.main(["function", "search", "--regex", "attach|detach"])
+
+    assert rc == 0
+    assert captured["op"] == "search_functions"
+    assert captured["params"]["query"] == "attach|detach"
+    assert captured["params"]["regex"] is True
+    assert "offset" not in captured["params"]
+    assert "limit" not in captured["params"]
+    assert capsys.readouterr().out == "0x401000  load_attachment\n"
 
 
 def test_parser_defaults_reads_to_text_and_mutations_to_json():
@@ -63,6 +105,16 @@ def test_parser_defaults_reads_to_text_and_mutations_to_json():
     assert parser.parse_args(["bundle", "function", "sub_401000"]).format == "json"
     assert parser.parse_args(["symbol", "rename", "sub_401000", "player_update"]).format == "json"
     assert parser.parse_args(["types", "declare", "typedef struct Player { int hp; } Player;"]).format == "json"
+
+
+def test_function_commands_do_not_accept_paging_flags():
+    parser = bn.cli.build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["function", "list", "--limit", "10"])
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["function", "search", "--offset", "10", "attach"])
 
 
 def test_function_info_uses_active_target_and_text_renderer(monkeypatch, capsys):

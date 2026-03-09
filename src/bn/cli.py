@@ -784,29 +784,36 @@ def _refresh(args: argparse.Namespace) -> int:
 
 
 def _function_list(args: argparse.Namespace) -> int:
+    params: dict[str, Any] = {}
+    if args.min_address is not None:
+        params["min_address"] = args.min_address
+    if args.max_address is not None:
+        params["max_address"] = args.max_address
     return _call(
         args,
         "list_functions",
-        {"offset": args.offset, "limit": args.limit},
+        params,
         require_target=True,
         text_renderer=_render_name_address_list_text,
-        page_limit=args.limit,
-        page_offset=args.offset,
-        page_label="function list",
         stem="functions",
     )
 
 
 def _function_search(args: argparse.Namespace) -> int:
+    params = {
+        "query": args.query,
+        "regex": bool(args.regex),
+    }
+    if args.min_address is not None:
+        params["min_address"] = args.min_address
+    if args.max_address is not None:
+        params["max_address"] = args.max_address
     return _call(
         args,
         "search_functions",
-        {"query": args.query, "offset": args.offset, "limit": args.limit},
+        params,
         require_target=True,
         text_renderer=_render_name_address_list_text,
-        page_limit=args.limit,
-        page_offset=args.offset,
-        page_label="function search",
         stem="function-search",
     )
 
@@ -1227,6 +1234,17 @@ def _add_paged_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--limit", type=int, default=100)
 
 
+def _add_function_address_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--min-address",
+        help="Only include functions whose start address is at or above this address",
+    )
+    parser.add_argument(
+        "--max-address",
+        help="Only include functions whose start address is at or below this address",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="bn", description="Agent-friendly Binary Ninja CLI")
     parser.set_defaults(handler=None)
@@ -1275,12 +1293,17 @@ def build_parser() -> argparse.ArgumentParser:
     function_list = function_sub.add_parser("list", help="List functions")
     _common_io_options(function_list)
     _target_option(function_list, required=False, default="active")
-    _add_paged_args(function_list)
+    _add_function_address_args(function_list)
     function_list.set_defaults(handler=_function_list)
-    function_search = function_sub.add_parser("search", help="Search functions by substring")
+    function_search = function_sub.add_parser("search", help="Search functions by substring or regex")
     _common_io_options(function_search)
     _target_option(function_search, required=False, default="active")
-    _add_paged_args(function_search)
+    _add_function_address_args(function_search)
+    function_search.add_argument(
+        "--regex",
+        action="store_true",
+        help="Interpret query as a case-insensitive regular expression",
+    )
     function_search.add_argument("query")
     function_search.set_defaults(handler=_function_search)
     function_info = function_sub.add_parser("info", help="Show function prototype and variables")

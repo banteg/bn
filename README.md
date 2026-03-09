@@ -99,12 +99,16 @@ Examples:
 
 ```bash
 bn function list --format ndjson
+bn function list --min-address 0x401000 --max-address 0x40ffff
+bn function search --regex 'attach|detach'
 bn decompile sample_track_floor_height_at_position --out /tmp/floor.json
 ```
 
 If `--out` is set, the command writes the rendered result to that path and prints a compact JSON envelope with the artifact path, byte size, token count, tokenizer, hash, and summary. Agents can use that envelope to decide whether to read the full artifact, keep a summary, or defer loading it into context.
 
 The only exception is `bn bundle function`, which writes the bundle artifact from inside the bridge and prints the envelope back to the CLI.
+
+`bn function list` and `bn function search` return the full matching set for the selected target or address range. Large results auto-spill to an artifact instead of forcing manual pagination.
 
 ## Extraction Commands
 
@@ -115,7 +119,9 @@ bn target list
 bn target info
 
 bn function list
+bn function list --min-address 0x401000 --max-address 0x40ffff
 bn function search attachment
+bn function search --regex 'attach|detach|follow'
 bn function info end_track_attachment_follow_state
 bn proto get end_track_attachment_follow_state
 bn local list end_track_attachment_follow_state
@@ -135,6 +141,8 @@ bn types declare --file /path/to/win32_min.h --preview
 bn strings --query follow
 bn imports
 ```
+
+`bn function search` stays case-insensitive substring matching by default. Add `--regex` when you need regular expressions. `bn function list` and `bn function search` both accept `--min-address` and `--max-address` to filter by function start address.
 
 ## Bundles And Python
 

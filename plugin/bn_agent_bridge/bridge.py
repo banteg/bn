@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import socketserver
 import threading
 import traceback
@@ -503,13 +504,18 @@ class BinaryNinjaBridge:
             return self._refresh(target)
 
         if op == "list_functions":
-            return self._list_functions(target, params.get("offset", 0), params.get("limit", 100))
+            return self._list_functions(
+                target,
+                min_address=params.get("min_address"),
+                max_address=params.get("max_address"),
+            )
         if op == "search_functions":
             return self._search_functions(
                 target,
                 str(params.get("query", "")),
-                params.get("offset", 0),
-                params.get("limit", 100),
+                regex=bool(params.get("regex", False)),
+                min_address=params.get("min_address"),
+                max_address=params.get("max_address"),
             )
         if op == "function_info":
             return self._function_info(target, params["identifier"])
@@ -1006,26 +1012,83 @@ class BinaryNinjaBridge:
             )
         return {"address": hex(address), "code_refs": code_refs, "data_refs": data_refs}
 
-    def _list_functions(self, selector: str | None, offset: int, limit: int):
-        bv = self._resolve_view(selector)
-        items = sorted(
-            [
-                {"name": fn.name, "address": hex(fn.start), "raw_name": getattr(fn, "raw_name", fn.name)}
-                for fn in list(bv.functions)
-            ],
-            key=lambda item: (int(item["address"], 16), item["name"]),
-        )
-        return items[offset : offset + limit]
+    def _parse_function_address_bounds(
+        self,
+        min_address: Any = None,
+        max_address: Any = None,
+    ) -> tuple[int | None, int | None]:
+        lower = _parse_address(min_address) if min_address not in (None, "") else None
+        upper = _parse_address(max_address) if max_address not in (None, "") else None
+        if lower is not None and upper is not None and lower > upper:
+            raise OperationFailure(
+                "invalid_address_range",
+                f"Invalid function address range: {hex(lower)} is greater than {hex(upper)}",
+            )
+        return lower, upper
 
-    def _search_functions(self, selector: str | None, query: str, offset: int, limit: int):
+    def _filtered_functions(
+        self,
+        bv,
+        *,
+        min_address: Any = None,
+        max_address: Any = None,
+    ) -> list[Any]:
+        lower, upper = self._parse_function_address_bounds(min_address, max_address)
+        functions = []
+        for fn in list(bv.functions):
+            address = int(fn.start)
+            if lower is not None and address < lower:
+                continue
+            if upper is not None and address > upper:
+                continue
+            functions.append(fn)
+        functions.sort(key=lambda fn: (int(fn.start), fn.name))
+        return functions
+
+    def _list_functions(
+        self,
+        selector: str | None,
+        *,
+        min_address: Any = None,
+        max_address: Any = None,
+    ):
+        bv = self._resolve_view(selector)
+        items = [
+            {"name": fn.name, "address": hex(fn.start), "raw_name": getattr(fn, "raw_name", fn.name)}
+            for fn in self._filtered_functions(bv, min_address=min_address, max_address=max_address)
+        ]
+        return items
+
+    def _search_functions(
+        self,
+        selector: str | None,
+        query: str,
+        *,
+        regex: bool = False,
+        min_address: Any = None,
+        max_address: Any = None,
+    ):
         bv = self._resolve_view(selector)
         items = []
-        needle = query.lower()
-        for fn in list(bv.functions):
-            if needle in fn.name.lower():
-                items.append({"name": fn.name, "address": hex(fn.start)})
-        items.sort(key=lambda item: (int(item["address"], 16), item["name"]))
-        return items[offset : offset + limit]
+        if regex:
+            try:
+                pattern = re.compile(query, re.IGNORECASE)
+            except re.error as exc:
+                raise OperationFailure("invalid_regex", f"Invalid function regex: {exc}") from exc
+
+            def matches(name: str) -> bool:
+                return bool(pattern.search(name))
+
+        else:
+            needle = query.lower()
+
+            def matches(name: str) -> bool:
+                return needle in name.lower()
+
+        for fn in self._filtered_functions(bv, min_address=min_address, max_address=max_address):
+            if matches(fn.name):
+                items.append({"name": fn.name, "address": hex(fn.start), "raw_name": getattr(fn, "raw_name", fn.name)})
+        return items
 
     def _decompile(self, selector: str | None, identifier):
         bv = self._resolve_view(selector)
