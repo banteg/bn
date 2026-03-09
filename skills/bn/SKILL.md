@@ -102,11 +102,7 @@ If you really need inline multiline code without a heredoc, use ANSI-C quoting i
 bn py exec --code $'print(hex(bv.entry_point))\nresult = {"functions": len(list(bv.functions))}'
 ```
 
-The `py exec` environment includes:
-- `bn`
-- `binaryninja`
-- `bv`
-- `result`
+The `py exec` environment includes:`bn`, `binaryninja`, `bv`, `result`.
 
 `py exec` always returns `stdout` and `result`. If `result` is not JSON-serializable, the CLI returns `repr(result)` plus a warning instead of silently flattening it.
 
@@ -126,10 +122,7 @@ bn proto set sub_401000 "int __cdecl player_update(Player* self)" --preview
 
 Preview mode applies the change, refreshes analysis, captures affected decompile diffs, and then reverts the mutation.
 
-For struct previews, inspect:
-- `results`
-- `affected_types`
-- `affected_functions`
+For struct previews, inspect:`results`, `affected_types`, `affected_functions`.
 
 For the first few changed functions, `affected_functions` may also include `before_excerpt` and `after_excerpt` HLIL snippets around the first changed lines.
 
