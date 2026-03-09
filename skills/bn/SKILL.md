@@ -1,9 +1,9 @@
 ---
-name: binary-ninja-cli
+name: bn
 description: Use the local bn CLI for Binary Ninja reversing work when a Binary Ninja GUI session is already open. Prefer this skill for decompilation, function search, IL/disassembly, xrefs, type inspection, struct field edits, previewed mutations, and inline Python execution through the bn bridge.
 ---
 
-# Binary Ninja CLI
+# bn
 
 Use this skill when the user wants reverse-engineering work against an already-open Binary Ninja database and the local `bn` CLI is available.
 

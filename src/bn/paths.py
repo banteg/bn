@@ -7,10 +7,18 @@ from pathlib import Path
 
 
 PLUGIN_NAME = "bn_agent_bridge"
+SKILL_NAME = "bn"
 
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
+
+
+def codex_home() -> Path:
+    env = os.environ.get("CODEX_HOME")
+    if env:
+        return Path(env).expanduser()
+    return Path.home() / ".codex"
 
 
 def cache_home() -> Path:
@@ -68,3 +76,15 @@ def binary_ninja_plugin_dir() -> Path:
 
 def plugin_install_dir() -> Path:
     return binary_ninja_plugin_dir() / PLUGIN_NAME
+
+
+def codex_skills_dir() -> Path:
+    return codex_home() / "skills"
+
+
+def skill_source_dir() -> Path:
+    return repo_root() / "skills" / SKILL_NAME
+
+
+def skill_install_dir() -> Path:
+    return codex_skills_dir() / SKILL_NAME

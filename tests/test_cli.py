@@ -58,6 +58,8 @@ def test_parser_defaults_reads_to_text_and_mutations_to_json():
     assert parser.parse_args(["function", "list"]).format == "text"
     assert parser.parse_args(["decompile", "sub_401000"]).format == "text"
     assert parser.parse_args(["plugin", "install"]).format == "json"
+    assert parser.parse_args(["skill", "install"]).format == "json"
+    assert parser.parse_args(["skill", "install"]).mode == "symlink"
     assert parser.parse_args(["bundle", "function", "sub_401000"]).format == "json"
     assert parser.parse_args(["symbol", "rename", "sub_401000", "player_update"]).format == "json"
     assert parser.parse_args(["types", "declare", "typedef struct Player { int hp; } Player;"]).format == "json"
@@ -188,6 +190,23 @@ def test_plugin_install_copy_mode(tmp_path):
     )
     assert rc == 0
     assert (destination / "bridge.py").exists()
+
+
+def test_skill_install_copy_mode(tmp_path):
+    destination = tmp_path / "skill-copy"
+    rc = bn.cli.main(
+        [
+            "skill",
+            "install",
+            "--mode",
+            "copy",
+            "--dest",
+            str(destination),
+        ]
+    )
+    assert rc == 0
+    assert (destination / "SKILL.md").exists()
+    assert (destination / "agents" / "openai.yaml").exists()
 
 
 def test_target_list_text_format_renders_summary(monkeypatch, capsys):

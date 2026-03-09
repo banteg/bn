@@ -1,0 +1,4 @@
+interface:
+  display_name: "bn"
+  short_description: "Use bn for Binary Ninja reversing tasks"
+  default_prompt: "Use $bn to do Binary Ninja reversing work through the local bn CLI."

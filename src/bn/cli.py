@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .output import write_output
-from .paths import plugin_install_dir, plugin_source_dir
+from .paths import plugin_install_dir, plugin_source_dir, skill_install_dir, skill_source_dir
 from .transport import BridgeError, _send_request_to_instance, list_instances, send_request
 from .version import VERSION, build_id_for_file
 
@@ -691,24 +691,8 @@ def _doctor(args: argparse.Namespace) -> int:
 
 def _plugin_install(args: argparse.Namespace) -> int:
     source = plugin_source_dir()
-    if not source.exists():
-        raise BridgeError(f"Plugin source directory is missing: {source}")
-
     dest = args.dest or plugin_install_dir()
-    dest.parent.mkdir(parents=True, exist_ok=True)
-
-    if dest.exists() or dest.is_symlink():
-        if not args.force:
-            raise BridgeError(f"Destination already exists: {dest}")
-        if dest.is_symlink() or dest.is_file():
-            dest.unlink()
-        else:
-            shutil.rmtree(dest)
-
-    if args.mode == "copy":
-        shutil.copytree(source, dest)
-    else:
-        os.symlink(source, dest, target_is_directory=True)
+    _install_tree(source, dest, mode=args.mode, force=args.force)
 
     _render_result(
         {
@@ -720,6 +704,46 @@ def _plugin_install(args: argparse.Namespace) -> int:
         fmt=args.format,
         out_path=args.out,
         stem="plugin-install",
+    )
+    return 0
+
+
+def _install_tree(source: Path, dest: Path, *, mode: str, force: bool) -> None:
+    if not source.exists():
+        raise BridgeError(f"Source directory is missing: {source}")
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    if dest.exists() or dest.is_symlink():
+        if not force:
+            raise BridgeError(f"Destination already exists: {dest}")
+        if dest.is_symlink() or dest.is_file():
+            dest.unlink()
+        else:
+            shutil.rmtree(dest)
+
+    if mode == "copy":
+        shutil.copytree(source, dest)
+    else:
+        os.symlink(source, dest, target_is_directory=True)
+
+
+def _skill_install(args: argparse.Namespace) -> int:
+    source = skill_source_dir()
+    dest = args.dest or skill_install_dir()
+    _install_tree(source, dest, mode=args.mode, force=args.force)
+
+    _render_result(
+        {
+            "installed": True,
+            "mode": args.mode,
+            "skill": source.name,
+            "source": str(source),
+            "destination": str(dest),
+        },
+        fmt=args.format,
+        out_path=args.out,
+        stem="skill-install",
     )
     return 0
 
@@ -1221,6 +1245,15 @@ def build_parser() -> argparse.ArgumentParser:
     plugin_install.add_argument("--force", action="store_true")
     _common_io_options(plugin_install, default_format="json")
     plugin_install.set_defaults(handler=_plugin_install)
+
+    skill = subparsers.add_parser("skill", help="Install the bundled Codex skill")
+    skill_sub = skill.add_subparsers(dest="skill_command")
+    skill_install = skill_sub.add_parser("install", help="Install the bundled Codex skill")
+    skill_install.add_argument("--dest", type=Path, help="Custom install destination")
+    skill_install.add_argument("--mode", choices=("symlink", "copy"), default="symlink")
+    skill_install.add_argument("--force", action="store_true")
+    _common_io_options(skill_install, default_format="json")
+    skill_install.set_defaults(handler=_skill_install)
 
     target = subparsers.add_parser("target", help="Inspect Binary Ninja targets")
     target_sub = target.add_subparsers(dest="target_command")
