@@ -384,3 +384,64 @@ def test_read_write_lock_allows_parallel_readers(monkeypatch):
     second.join(1)
 
     assert sorted(entered) == ["first", "second"]
+
+
+def test_collect_open_views_uses_tabs_api(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+
+    class _View:
+        def __init__(self, data):
+            self._data = data
+
+        def getData(self):
+            return self._data
+
+    class _Frame:
+        def __init__(self, data):
+            self._data = data
+
+        def getCurrentBinaryView(self):
+            return self._data
+
+        def getCurrentView(self):
+            return _View(self._data)
+
+    view_a = object()
+    view_b = object()
+    view_c = object()
+
+    class _Context:
+        def getCurrentViewFrame(self):
+            return _Frame(view_c)
+
+        def getTabs(self):
+            return ["tab-a", "tab-b", "tab-c"]
+
+        def getViewFrameForTab(self, tab):
+            mapping = {
+                "tab-a": _Frame(view_a),
+                "tab-b": _Frame(view_b),
+                "tab-c": _Frame(view_c),
+            }
+            return mapping[tab]
+
+        def getViewForTab(self, tab):
+            mapping = {
+                "tab-a": _View(view_a),
+                "tab-b": _View(view_b),
+                "tab-c": _View(view_c),
+            }
+            return mapping[tab]
+
+    fake_ui = types.SimpleNamespace(
+        UIContext=types.SimpleNamespace(
+            allContexts=lambda: [_Context()],
+            activeContext=lambda: None,
+        )
+    )
+    monkeypatch.setattr(bridge, "ui", fake_ui)
+
+    views = bridge._collect_open_views()
+
+    assert len(views) == 3
+    assert set(id(view) for view in views) == {id(view_a), id(view_b), id(view_c)}

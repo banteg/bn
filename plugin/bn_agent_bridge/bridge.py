@@ -197,25 +197,18 @@ def _active_binary_view():
         return None
 
     def resolve():
-        def view_from_frame(frame):
-            if frame is None:
-                return None
-            if hasattr(frame, "getCurrentBinaryView"):
-                return frame.getCurrentBinaryView()
-            if hasattr(frame, "getBinaryView"):
-                return frame.getBinaryView()
-            return None
-
         try:
             context = ui.UIContext.activeContext()
             if context is not None:
-                view = view_from_frame(context.getCurrentViewFrame())
+                frame = context.getCurrentViewFrame()
+                view = frame.getCurrentBinaryView() if frame is not None else None
                 if view is not None:
                     return view
 
             contexts = list(ui.UIContext.allContexts())
             if len(contexts) == 1:
-                return view_from_frame(contexts[0].getCurrentViewFrame())
+                frame = contexts[0].getCurrentViewFrame()
+                return frame.getCurrentBinaryView() if frame is not None else None
         except Exception:
             return None
         return None
@@ -230,43 +223,46 @@ def _collect_open_views() -> list[Any]:
 
     def collect():
         found: list[Any] = []
-        contexts = []
         try:
             contexts = list(ui.UIContext.allContexts())
         except Exception:
-            pass
+            contexts = []
         if not contexts:
             active_context = ui.UIContext.activeContext()
             if active_context is not None:
                 contexts = [active_context]
 
+        def collect_binary_view(view):
+            if view is not None:
+                found.append(view)
+
         def collect_from_frame(frame):
             if frame is None:
                 return
-            for attr in ("getCurrentBinaryView", "getBinaryView"):
-                try:
-                    getter = getattr(frame, attr, None)
-                    if callable(getter):
-                        value = getter()
-                        if value is not None:
-                            found.append(value)
-                except Exception:
-                    continue
+            collect_binary_view(frame.getCurrentBinaryView())
+
+        def collect_from_tab(context, tab):
+            try:
+                collect_from_frame(context.getViewFrameForTab(tab))
+            except Exception:
+                pass
+            try:
+                view = context.getViewForTab(tab)
+                collect_binary_view(view.getData() if view is not None else None)
+            except Exception:
+                pass
 
         for context in contexts:
             try:
                 collect_from_frame(context.getCurrentViewFrame())
             except Exception:
                 pass
-            for attr in ("getViewFrames", "viewFrames", "allViewFrames", "frames"):
-                try:
-                    getter = getattr(context, attr, None)
-                    frames = getter() if callable(getter) else getter
-                    if frames:
-                        for frame in list(frames):
-                            collect_from_frame(frame)
-                except Exception:
-                    continue
+            try:
+                tabs = list(context.getTabs())
+            except Exception:
+                tabs = []
+            for tab in tabs:
+                collect_from_tab(context, tab)
 
         unique: list[Any] = []
         seen: set[int] = set()
