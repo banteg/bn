@@ -121,6 +121,13 @@ class _FakeMutationBV(_FakeBV):
         self.events.append(("commit", state))
 
 
+class _ParseResult:
+    def __init__(self, *, types=None, variables=None, functions=None):
+        self.types = dict(types or {})
+        self.variables = dict(variables or {})
+        self.functions = dict(functions or {})
+
+
 def test_resolve_rename_target_rejects_ambiguous_function_identifier(monkeypatch):
     bridge = _load_bridge(monkeypatch)
     instance = bridge.BinaryNinjaBridge()
@@ -213,6 +220,80 @@ def test_refresh_updates_analysis_and_returns_target_info(monkeypatch):
     assert result["refreshed"] is True
     assert result["target"]["selector"] == "SnailMail_unwrapped.exe.bndb"
     assert "refresh" in bv.events
+
+
+def test_parse_declaration_source_uses_platform_parser_with_source_path(monkeypatch, tmp_path):
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+    recorded = {}
+
+    class _Platform:
+        def parse_types_from_source(self, source, **kwargs):
+            recorded["source"] = source
+            recorded["kwargs"] = kwargs
+            return _ParseResult(types={"Player": "struct Player"})
+
+    class _SourceBV(_FakeBV):
+        def __init__(self):
+            super().__init__()
+            self.platform = _Platform()
+
+        def parse_types_from_string(self, declaration):
+            raise AssertionError("string parser should not be used when source parsing succeeds")
+
+    header_path = tmp_path / "win32_min.h"
+    header_path.write_text("typedef struct Player { int hp; } Player;", encoding="utf-8")
+    bv = _SourceBV()
+
+    parsed = instance._parse_declaration_source(bv, header_path.read_text(encoding="utf-8"), source_path=str(header_path))
+
+    assert [name for name, _ in parsed["types"]] == ["Player"]
+    assert recorded["kwargs"]["filename"] == str(header_path)
+    assert recorded["kwargs"]["include_dirs"] == [str(header_path.parent.resolve())]
+
+
+def test_op_types_declare_accepts_source_without_named_types(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+
+    class _Platform:
+        def parse_types_from_source(self, source, **kwargs):
+            return _ParseResult(
+                functions={"DirectInput8Create": "int32_t(void)"},
+                variables={"GUID_SysKeyboard": "GUID"},
+            )
+
+    class _SourceOnlyBV(_FakeBV):
+        def __init__(self):
+            super().__init__()
+            self.platform = _Platform()
+            self.defined: list[tuple[str, str]] = []
+
+        def parse_types_from_string(self, declaration):
+            raise AssertionError("string parser should not be used when source parsing succeeds")
+
+        def get_type_by_name(self, name):
+            return None
+
+        def define_user_type(self, name, type_obj):
+            self.defined.append((name, type_obj))
+
+    bv = _SourceOnlyBV()
+
+    result = instance._op_types_declare(
+        bv,
+        {
+            "op": "types_declare",
+            "declaration": "extern const GUID GUID_SysKeyboard;",
+            "source_path": "/tmp/win32_min.h",
+        },
+    )
+
+    assert result["count"] == 0
+    assert result["defined_types"] == {}
+    assert result["parsed_functions"] == ["DirectInput8Create"]
+    assert result["parsed_variables"] == ["GUID_SysKeyboard"]
+    assert bv.defined == []
 
 
 def test_diff_snapshots_marks_name_only_changes(monkeypatch):

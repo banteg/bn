@@ -117,6 +117,7 @@ bn comment get --address 0x401000
 bn types --query Player
 bn types show Player --format text
 bn struct show Player --format text
+bn types declare --file /path/to/win32_min.h --preview
 bn strings --query follow
 bn imports
 bn data
@@ -190,6 +191,10 @@ Mutation results now distinguish:
 - `verification_failed`
 
 When verification fails, JSON output also includes `requested` and `observed` state for the failed op.
+
+`bn types declare` now uses Binary Ninja's source parser when available. When you pass `--file`, the CLI also forwards the source path so relative includes resolve the same way they would during header import in the GUI.
+
+If a declaration only parses functions or extern variables and introduces no named types to persist, `types declare` returns a verified no-op instead of failing with `No named types found in declaration`.
 
 ## Batch Manifests
 

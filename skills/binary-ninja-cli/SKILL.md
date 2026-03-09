@@ -41,6 +41,7 @@ bn comment get --address 0x401000
 bn types --query Player
 bn types show Player --format text
 bn struct show Player --format text
+bn types declare --file /path/to/win32_min.h --preview
 bn strings --query follow
 bn bundle function sample_track_floor_height_at_position --out /tmp/floor.json
 ```
@@ -61,6 +62,7 @@ Prefer preview first:
 
 ```bash
 bn types declare "typedef struct Player { int hp; } Player;" --preview
+bn types declare --file /path/to/win32_min.h --preview
 bn struct field set Player 0x308 movement_flag_selector uint32_t --preview
 bn symbol rename sub_401000 player_update --preview
 bn proto set sub_401000 "int __cdecl player_update(Player* self)" --preview
@@ -74,6 +76,10 @@ For struct previews, inspect:
 For the first few changed functions, `affected_functions` may also include `before_excerpt` and `after_excerpt` HLIL snippets around the first changed lines.
 
 If a struct edit is already identical, preview may report `changed: false` with `No effective change detected`.
+
+`bn types declare` uses Binary Ninja's source parser when available. With `--file`, it forwards the real source path so relative includes work like GUI header import.
+
+If a declaration only introduces functions or extern variables and no named types, `types declare` now reports a no-op instead of failing with `No named types found in declaration`.
 
 Non-preview writes are live-verified by default. If the requested state does not read back from Binary Ninja, the command exits nonzero and the whole mutation or batch is reverted.
 

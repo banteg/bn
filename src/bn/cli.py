@@ -483,9 +483,18 @@ def _format_operation_result(item: dict[str, Any]) -> str:
     if op == "struct_field_delete":
         return f"struct_field_delete {item.get('struct_name', '<unknown>')}::{item.get('field_name', '<unknown>')}"
     if op == "struct_replace":
-        return f"struct_replace {', '.join(sorted((item.get('defined_types') or {}).keys())) or '<none>'}"
+        type_names = ", ".join(sorted((item.get("defined_types") or {}).keys())) or "<none>"
+        return (
+            f"struct_replace {type_names}"
+            f" (parsed functions={item.get('parsed_function_count', len(item.get('parsed_functions') or []))},"
+            f" variables={item.get('parsed_variable_count', len(item.get('parsed_variables') or []))})"
+        )
     if op == "types_declare":
-        return f"types_declare {item.get('count', 0)} types"
+        return (
+            f"types_declare {item.get('count', 0)} types"
+            f" (parsed functions={item.get('parsed_function_count', len(item.get('parsed_functions') or []))},"
+            f" variables={item.get('parsed_variable_count', len(item.get('parsed_variables') or []))})"
+        )
     if op == "patch_bytes":
         return f"patch_bytes {item.get('address', '<unknown>')} {item.get('patched', '<unknown>')}"
     return _render_fallback_text(item)
@@ -816,10 +825,12 @@ def _types_show(args: argparse.Namespace) -> int:
 
 
 def _types_declare(args: argparse.Namespace) -> int:
+    source_path = None
     if args.file is not None:
         if not args.file.exists():
             raise BridgeError(f"Declaration file not found: {args.file}")
         declaration = args.file.read_text(encoding="utf-8")
+        source_path = str(args.file)
     elif args.stdin:
         declaration = sys.stdin.read()
     elif args.declaration:
@@ -832,6 +843,7 @@ def _types_declare(args: argparse.Namespace) -> int:
         "types_declare",
         {
             "declaration": declaration,
+            "source_path": source_path,
             "preview": bool(args.preview),
         },
         require_target=True,

@@ -293,6 +293,26 @@ def test_types_declare_defaults_to_active_when_single_target_open(monkeypatch):
     assert "typedef struct Player" in calls[1]["params"]["declaration"]
 
 
+def test_types_declare_passes_source_path_for_file_input(monkeypatch, tmp_path):
+    captured = {}
+    declaration_file = tmp_path / "win32_min.h"
+    declaration_file.write_text("typedef struct Player { int hp; } Player;", encoding="utf-8")
+
+    def fake_send_request(op, *, params=None, target=None, timeout=30.0):
+        captured["op"] = op
+        captured["params"] = params
+        captured["target"] = target
+        return {"ok": True, "result": {"preview": False, "success": True, "results": []}}
+
+    monkeypatch.setattr(bn.cli, "send_request", fake_send_request)
+
+    rc = bn.cli.main(["types", "declare", "--target", "active", "--file", str(declaration_file)])
+
+    assert rc == 0
+    assert captured["op"] == "types_declare"
+    assert captured["params"]["source_path"] == str(declaration_file)
+
+
 def test_xrefs_field_routes_to_field_xrefs(monkeypatch, capsys):
     captured = {}
 

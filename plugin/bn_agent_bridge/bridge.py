@@ -1237,19 +1237,44 @@ class BinaryNinjaBridge:
                     break
         return matches
 
-    def _parse_declared_types(self, bv, declaration: str):
-        parse_result = bv.parse_types_from_string(declaration)
-        named_types = list(getattr(parse_result, "types", {}).items())
-        if not named_types:
-            raise RuntimeError("No named types found in declaration")
-        return named_types
+    def _parse_declaration_source(self, bv, declaration: str, *, source_path: str | None = None):
+        parse_result = None
+        source_error: Exception | None = None
+        platform = getattr(bv, "platform", None)
+        if platform is not None and hasattr(platform, "parse_types_from_source"):
+            kwargs: dict[str, Any] = {}
+            if source_path:
+                kwargs["filename"] = source_path
+                kwargs["include_dirs"] = [str(Path(source_path).expanduser().resolve().parent)]
+            try:
+                parse_result = platform.parse_types_from_source(declaration, **kwargs)
+            except Exception as exc:
+                source_error = exc
+
+        if parse_result is None:
+            try:
+                parse_result = bv.parse_types_from_string(declaration)
+            except Exception:
+                if source_error is not None:
+                    raise source_error
+                raise
+
+        return {
+            "types": [(str(name), type_obj) for name, type_obj in list(getattr(parse_result, "types", {}).items())],
+            "variables": [(str(name), type_obj) for name, type_obj in list(getattr(parse_result, "variables", {}).items())],
+            "functions": [(str(name), type_obj) for name, type_obj in list(getattr(parse_result, "functions", {}).items())],
+        }
 
     def _operation_type_names(self, bv, op: dict[str, Any]) -> list[str]:
         kind = op.get("op") or "rename_symbol"
         if kind.startswith("struct_") and op.get("struct_name"):
             return [str(op["struct_name"])]
         if kind in {"struct_replace", "types_declare"}:
-            return [str(name) for name, _ in self._parse_declared_types(bv, str(op["declaration"]))]
+            return [name for name, _ in self._parse_declaration_source(
+                bv,
+                str(op["declaration"]),
+                source_path=op.get("source_path"),
+            )["types"]]
         return []
 
     def _guess_affected_functions(self, bv, operations: list[dict[str, Any]]):
@@ -1774,8 +1799,18 @@ class BinaryNinjaBridge:
 
     def _verify_declared_types(self, bv, result: dict[str, Any]) -> dict[str, Any]:
         item = dict(result)
+        defined_types = dict(item.get("defined_types") or {})
+        if not defined_types:
+            item["observed"] = {
+                "defined_types": {},
+                "parsed_functions": list(item.get("parsed_functions") or []),
+                "parsed_variables": list(item.get("parsed_variables") or []),
+            }
+            item["status"] = "noop"
+            item["message"] = "Parsed declarations but no named types were defined."
+            return item
         observed_types: dict[str, str | None] = {}
-        for name, expected in dict(item.get("defined_types") or {}).items():
+        for name, expected in defined_types.items():
             type_obj = bv.get_type_by_name(name)
             observed_types[name] = str(type_obj) if type_obj is not None else None
             if observed_types[name] != expected:
@@ -1787,7 +1822,7 @@ class BinaryNinjaBridge:
                 )
         item["observed"] = {"defined_types": observed_types}
         before = dict(item.get("before_defined_types") or {})
-        item["status"] = "noop" if before and all(before.get(name) == expected for name, expected in item["defined_types"].items()) else "verified"
+        item["status"] = "noop" if before and all(before.get(name) == expected for name, expected in defined_types.items()) else "verified"
         return item
 
     def _verify_patch_bytes(self, bv, result: dict[str, Any]) -> dict[str, Any]:
@@ -2114,7 +2149,14 @@ class BinaryNinjaBridge:
         }
 
     def _op_struct_replace(self, bv, op: dict[str, Any]):
-        named_types = self._parse_declared_types(bv, str(op["declaration"]))
+        parsed = self._parse_declaration_source(
+            bv,
+            str(op["declaration"]),
+            source_path=op.get("source_path"),
+        )
+        named_types = list(parsed["types"])
+        if not named_types:
+            raise OperationFailure("unsupported", "No named types found in declaration", requested=self._operation_requested(op))
         defined_types = {}
         before_defined_types = {}
         for name, type_obj in named_types:
@@ -2126,11 +2168,18 @@ class BinaryNinjaBridge:
             "op": "struct_replace",
             "defined_types": defined_types,
             "before_defined_types": before_defined_types,
+            "parsed_functions": [name for name, _ in parsed["functions"]],
+            "parsed_variables": [name for name, _ in parsed["variables"]],
             "requested": self._operation_requested(op),
         }
 
     def _op_types_declare(self, bv, op: dict[str, Any]):
-        named_types = self._parse_declared_types(bv, str(op["declaration"]))
+        parsed = self._parse_declaration_source(
+            bv,
+            str(op["declaration"]),
+            source_path=op.get("source_path"),
+        )
+        named_types = list(parsed["types"])
         defined_types = {}
         before_defined_types = {}
         for name, type_obj in named_types:
@@ -2143,6 +2192,11 @@ class BinaryNinjaBridge:
             "defined_types": defined_types,
             "before_defined_types": before_defined_types,
             "count": len(defined_types),
+            "parsed_functions": [name for name, _ in parsed["functions"]],
+            "parsed_variables": [name for name, _ in parsed["variables"]],
+            "parsed_type_count": len(named_types),
+            "parsed_function_count": len(parsed["functions"]),
+            "parsed_variable_count": len(parsed["variables"]),
             "requested": self._operation_requested(op),
         }
 
