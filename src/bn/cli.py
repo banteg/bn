@@ -474,7 +474,7 @@ def _render_doctor_text(value: Any) -> str:
             lines.append("- " + _render_fallback_text(item))
             continue
         doctor = item.get("doctor") if isinstance(item.get("doctor"), dict) else {}
-        status = "ok" if doctor.get("ok") else "error"
+        status = "ok" if doctor and not doctor.get("error") else "error"
         lines.append(
             "- "
             + f"pid={item.get('pid', '<unknown>')} plugin={item.get('plugin_version', '<unknown>')} status={status}"
