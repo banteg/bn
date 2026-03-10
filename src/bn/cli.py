@@ -16,6 +16,104 @@ from .version import VERSION, build_id_for_file
 FAILED_MUTATION_STATUSES = {"unsupported", "verification_failed"}
 
 
+class _HelpFullAction(argparse.Action):
+    def __init__(
+        self,
+        option_strings: list[str],
+        dest: str = argparse.SUPPRESS,
+        default: str = argparse.SUPPRESS,
+        help: str | None = None,
+    ) -> None:
+        super().__init__(
+            option_strings=option_strings,
+            dest=dest,
+            default=default,
+            nargs=0,
+            help=help,
+        )
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: str | list[str] | None,
+        option_string: str | None = None,
+    ) -> None:
+        if isinstance(parser, BnArgumentParser):
+            parser.print_full_help()
+        else:
+            parser.print_help()
+        parser.exit()
+
+
+class BnArgumentParser(argparse.ArgumentParser):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.set_defaults(_parser=self)
+        self.add_argument(
+            "--help-full",
+            action=_HelpFullAction,
+            help="Show help for this command and all subcommands",
+        )
+
+    def _iter_full_help_parsers(self) -> list[argparse.ArgumentParser]:
+        parsers: list[argparse.ArgumentParser] = [self]
+        for action in self._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                for parser in action.choices.values():
+                    if isinstance(parser, BnArgumentParser):
+                        parsers.extend(parser._iter_full_help_parsers())
+                    else:
+                        parsers.append(parser)
+        return parsers
+
+    def _full_help_actions(self) -> tuple[type[argparse.Action], ...]:
+        return (argparse._HelpAction, _HelpFullAction)
+
+    def format_help_for_full(self) -> str:
+        formatter = self._get_formatter()
+        help_action_types = self._full_help_actions()
+        actions = [action for action in self._actions if not isinstance(action, help_action_types)]
+
+        formatter.add_usage(self.usage, actions, self._mutually_exclusive_groups)
+        formatter.add_text(self.description)
+
+        for action_group in self._action_groups:
+            group_actions = [
+                action
+                for action in action_group._group_actions
+                if not isinstance(action, help_action_types)
+            ]
+            if not group_actions:
+                continue
+            formatter.start_section(action_group.title)
+            formatter.add_text(action_group.description)
+            formatter.add_arguments(group_actions)
+            formatter.end_section()
+
+        formatter.add_text(self.epilog)
+        return formatter.format_help()
+
+    def format_full_help(self) -> str:
+        sections: list[str] = []
+        seen: set[int] = set()
+        for parser in self._iter_full_help_parsers():
+            parser_id = id(parser)
+            if parser_id in seen:
+                continue
+            seen.add(parser_id)
+            if isinstance(parser, BnArgumentParser):
+                sections.append(parser.format_help_for_full().rstrip())
+            else:
+                sections.append(parser.format_help().rstrip())
+        return "\n\n".join(sections) + "\n"
+
+    def print_full_help(self, file: Any = None) -> None:
+        if file is None:
+            file = sys.stdout
+        self._print_message(self.format_full_help(), file)
+
+
 def _package_version() -> str:
     return VERSION
 
@@ -1271,8 +1369,8 @@ def _add_function_address_args(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="bn", description="Agent-friendly Binary Ninja CLI")
-    parser.set_defaults(handler=None, _parser=parser)
+    parser = BnArgumentParser(prog="bn", description="Agent-friendly Binary Ninja CLI")
+    parser.set_defaults(handler=None)
 
     subparsers = parser.add_subparsers(dest="command")
 
@@ -1281,7 +1379,6 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.set_defaults(handler=_doctor)
 
     plugin = subparsers.add_parser("plugin", help="Install the Binary Ninja companion plugin")
-    plugin.set_defaults(_parser=plugin)
     plugin_sub = plugin.add_subparsers(dest="plugin_command")
     plugin_install = plugin_sub.add_parser("install", help="Install the GUI plugin")
     plugin_install.add_argument("--dest", type=Path, help="Custom install destination")
@@ -1291,7 +1388,6 @@ def build_parser() -> argparse.ArgumentParser:
     plugin_install.set_defaults(handler=_plugin_install)
 
     skill = subparsers.add_parser("skill", help="Install the bundled Codex skill")
-    skill.set_defaults(_parser=skill)
     skill_sub = skill.add_subparsers(dest="skill_command")
     skill_install = skill_sub.add_parser("install", help="Install the bundled Codex skill")
     skill_install.add_argument("--dest", type=Path, help="Custom install destination")
@@ -1301,7 +1397,6 @@ def build_parser() -> argparse.ArgumentParser:
     skill_install.set_defaults(handler=_skill_install)
 
     target = subparsers.add_parser("target", help="Inspect Binary Ninja targets")
-    target.set_defaults(_parser=target)
     target_sub = target.add_subparsers(dest="target_command")
     target_list = target_sub.add_parser("list", help="List open BinaryView targets")
     _common_io_options(target_list)
@@ -1317,7 +1412,6 @@ def build_parser() -> argparse.ArgumentParser:
     refresh.set_defaults(handler=_refresh)
 
     function = subparsers.add_parser("function", help="Function discovery helpers")
-    function.set_defaults(_parser=function)
     function_sub = function.add_subparsers(dest="function_command")
     function_list = function_sub.add_parser("list", help="List functions")
     _common_io_options(function_list)
@@ -1402,7 +1496,6 @@ def build_parser() -> argparse.ArgumentParser:
     imports.set_defaults(handler=_imports)
 
     bundle = subparsers.add_parser("bundle", help="Export reusable bundles")
-    bundle.set_defaults(_parser=bundle)
     bundle_sub = bundle.add_subparsers(dest="bundle_command")
     bundle_function = bundle_sub.add_parser("function", help="Export a function bundle")
     _common_io_options(bundle_function, default_format="json")
@@ -1411,7 +1504,6 @@ def build_parser() -> argparse.ArgumentParser:
     bundle_function.set_defaults(handler=_bundle_function)
 
     py = subparsers.add_parser("py", help="Execute Python inside Binary Ninja")
-    py.set_defaults(_parser=py)
     py_sub = py.add_subparsers(dest="py_command")
     py_exec = py_sub.add_parser("exec", help="Execute a Python snippet")
     _common_io_options(py_exec)
@@ -1423,7 +1515,6 @@ def build_parser() -> argparse.ArgumentParser:
     py_exec.set_defaults(handler=_py_exec)
 
     symbol = subparsers.add_parser("symbol", help="Rename functions or data")
-    symbol.set_defaults(_parser=symbol)
     symbol_sub = symbol.add_subparsers(dest="symbol_command")
     symbol_rename = symbol_sub.add_parser("rename", help="Rename a symbol")
     _common_io_options(symbol_rename, default_format="json")
@@ -1435,7 +1526,6 @@ def build_parser() -> argparse.ArgumentParser:
     symbol_rename.set_defaults(handler=_symbol_rename)
 
     comment = subparsers.add_parser("comment", help="Set or delete comments")
-    comment.set_defaults(_parser=comment)
     comment_sub = comment.add_subparsers(dest="comment_command")
     comment_get = comment_sub.add_parser("get", help="Get a comment")
     _common_io_options(comment_get)
@@ -1460,7 +1550,6 @@ def build_parser() -> argparse.ArgumentParser:
     comment_delete.set_defaults(handler=_comment_delete)
 
     proto = subparsers.add_parser("proto", help="Inspect or set a user prototype")
-    proto.set_defaults(_parser=proto)
     proto_sub = proto.add_subparsers(dest="proto_command")
     proto_get = proto_sub.add_parser("get", help="Show the current prototype")
     _common_io_options(proto_get)
@@ -1476,7 +1565,6 @@ def build_parser() -> argparse.ArgumentParser:
     proto_set.set_defaults(handler=_proto_set)
 
     local = subparsers.add_parser("local", help="Inspect, rename, or retype locals")
-    local.set_defaults(_parser=local)
     local_sub = local.add_subparsers(dest="local_command")
     local_list = local_sub.add_parser("list", help="List locals with stable IDs")
     _common_io_options(local_list)
@@ -1501,7 +1589,6 @@ def build_parser() -> argparse.ArgumentParser:
     local_retype.set_defaults(handler=_local_retype)
 
     struct = subparsers.add_parser("struct", help="Field-first structure editing")
-    struct.set_defaults(_parser=struct)
     struct_sub = struct.add_subparsers(dest="struct_command")
     struct_show = struct_sub.add_parser("show", help="Show one struct layout")
     _common_io_options(struct_show)
@@ -1509,7 +1596,6 @@ def build_parser() -> argparse.ArgumentParser:
     struct_show.add_argument("struct_name")
     struct_show.set_defaults(handler=_struct_show)
     field = struct_sub.add_parser("field", help="Operate on struct fields")
-    field.set_defaults(_parser=field)
     field_sub = field.add_subparsers(dest="struct_field_command")
     field_set = field_sub.add_parser("set", help="Set or replace a field")
     _common_io_options(field_set, default_format="json")
@@ -1537,7 +1623,6 @@ def build_parser() -> argparse.ArgumentParser:
     field_delete.add_argument("field_name")
     field_delete.set_defaults(handler=_struct_field_delete)
     batch = subparsers.add_parser("batch", help="Apply a batch manifest")
-    batch.set_defaults(_parser=batch)
     batch_sub = batch.add_subparsers(dest="batch_command")
     batch_apply = batch_sub.add_parser("apply", help="Apply a JSON manifest")
     _common_io_options(batch_apply, default_format="json")

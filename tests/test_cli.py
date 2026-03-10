@@ -711,7 +711,8 @@ def test_missing_subcommand_prints_exact_help(capsys):
 
     assert rc == 1
     stdout, stderr = capsys.readouterr()
-    assert "usage: bn struct [-h] {show,field} ..." in stdout
+    assert "usage: bn struct [-h] [--help-full] {show,field} ..." in stdout
+    assert "--help-full   Show help for this command and all subcommands" in stdout
     assert "usage: bn [-h]" not in stdout
     assert stderr == ""
 
@@ -721,8 +722,52 @@ def test_missing_nested_subcommand_prints_exact_help(capsys):
 
     assert rc == 1
     stdout, stderr = capsys.readouterr()
-    assert "usage: bn struct field [-h] {set,rename,delete} ..." in stdout
+    assert "usage: bn struct field [-h] [--help-full] {set,rename,delete} ..." in stdout
+    assert "--help-full          Show help for this command and all subcommands" in stdout
     assert "usage: bn [-h]" not in stdout
+    assert stderr == ""
+
+
+def test_help_full_prints_recursive_root_help(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        bn.cli.main(["--help-full"])
+
+    assert exc_info.value.code == 0
+    stdout, stderr = capsys.readouterr()
+    assert "usage: bn\n" in stdout
+    assert "usage: bn struct {show,field} ..." in stdout
+    assert "usage: bn struct field set" in stdout
+    assert "-h, --help" not in stdout
+    assert "--help-full" not in stdout
+    assert stderr == ""
+
+
+def test_help_full_prints_recursive_subtree_help(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        bn.cli.main(["struct", "field", "--help-full"])
+
+    assert exc_info.value.code == 0
+    stdout, stderr = capsys.readouterr()
+    assert "usage: bn struct field {set,rename,delete} ..." in stdout
+    assert "usage: bn struct field set" in stdout
+    assert "usage: bn struct field rename" in stdout
+    assert "usage: bn\n" not in stdout
+    assert "-h, --help" not in stdout
+    assert "--help-full" not in stdout
+    assert stderr == ""
+
+
+def test_help_full_prints_leaf_help_without_required_positionals(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        bn.cli.main(["struct", "field", "set", "--help-full"])
+
+    assert exc_info.value.code == 0
+    stdout, stderr = capsys.readouterr()
+    assert "usage: bn struct field set" in stdout
+    assert "struct_name offset field_name field_type" in stdout
+    assert "usage: bn struct field rename" not in stdout
+    assert "-h, --help" not in stdout
+    assert "--help-full" not in stdout
     assert stderr == ""
 
 
