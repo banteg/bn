@@ -706,6 +706,26 @@ def test_removed_experimental_commands_are_not_present():
         parser.parse_args(["patch", "bytes"])
 
 
+def test_missing_subcommand_prints_exact_help(capsys):
+    rc = bn.cli.main(["struct"])
+
+    assert rc == 1
+    stdout, stderr = capsys.readouterr()
+    assert "usage: bn struct [-h] {show,field} ..." in stdout
+    assert "usage: bn [-h]" not in stdout
+    assert stderr == ""
+
+
+def test_missing_nested_subcommand_prints_exact_help(capsys):
+    rc = bn.cli.main(["struct", "field"])
+
+    assert rc == 1
+    stdout, stderr = capsys.readouterr()
+    assert "usage: bn struct field [-h] {set,rename,delete} ..." in stdout
+    assert "usage: bn [-h]" not in stdout
+    assert stderr == ""
+
+
 def test_doctor_reports_stale_loaded_plugin(monkeypatch, tmp_path, capsys):
     install_dir = tmp_path / "install"
     source_dir = tmp_path / "source"
