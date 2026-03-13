@@ -110,7 +110,7 @@ If `--out` is set, the command writes the rendered result to that path and print
 
 The only exception is `bn bundle function`, which writes the bundle artifact from inside the bridge and prints the envelope back to the CLI.
 
-`bn function list` and `bn function search` return the full matching set for the selected target or address range. Large results auto-spill to an artifact instead of forcing manual pagination. Spill is token-based and currently triggers above 10,000 tokens, and the CLI also emits a stderr warning with the artifact path plus useful size counts.
+`bn function list` and `bn function search` return the full matching set for the selected target or address range. Large results auto-spill to an artifact instead of forcing manual pagination. Spill is token-based and currently triggers above 10,000 tokens. When that happens, stdout stays empty and stderr carries the spill metadata as plain text, including the artifact path and size counts.
 
 ## Extraction Commands
 

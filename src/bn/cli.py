@@ -157,24 +157,40 @@ def _render_result(
     spill_context: Any = None,
 ) -> None:
     result = write_output_result(value, fmt=fmt, out_path=out_path, stem=stem)
-    sys.stdout.write(result.rendered)
     if result.spilled and result.artifact:
-        artifact = result.artifact
-        details = [
-            f"format={artifact['format']}",
-            f"tokens={artifact['tokens']}",
-            f"bytes={artifact['bytes']}",
-            f"tokenizer={artifact['tokenizer']}",
-        ]
-        if isinstance(spill_context, list):
-            details.append(f"items={len(spill_context)}")
-        if isinstance(value, str):
-            details.append(f"lines={len(value.splitlines())}")
         label = spill_label or stem.replace("_", " ")
-        print(
-            f"warning: {label} output spilled to {artifact['artifact_path']} ({', '.join(details)})",
-            file=sys.stderr,
-        )
+        artifact = result.artifact
+        lines = [
+            f"warning: {label} output spilled",
+            f"path: {artifact['artifact_path']}",
+            f"format: {artifact['format']}",
+            f"bytes: {artifact['bytes']}",
+            f"tokens: {artifact['tokens']}",
+            f"tokenizer: {artifact['tokenizer']}",
+        ]
+        if isinstance(artifact.get("sha256"), str):
+            lines.append(f"sha256: {artifact['sha256']}")
+        summary = artifact.get("summary")
+        if isinstance(summary, dict):
+            summary_parts = []
+            kind = summary.get("kind")
+            if kind is not None:
+                summary_parts.append(f"kind={kind}")
+            for key in sorted(summary):
+                if key == "kind":
+                    continue
+                summary_parts.append(
+                    f"{key}={json.dumps(summary[key], sort_keys=True, default=str)}"
+                )
+            if summary_parts:
+                lines.append(f"summary: {', '.join(summary_parts)}")
+        if isinstance(spill_context, list):
+            lines.append(f"items: {len(spill_context)}")
+        if isinstance(value, str):
+            lines.append(f"lines: {len(value.splitlines())}")
+        print("\n".join(lines), file=sys.stderr)
+        return
+    sys.stdout.write(result.rendered)
 
 
 def _implicit_target(args: argparse.Namespace) -> str:

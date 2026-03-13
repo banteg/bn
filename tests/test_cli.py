@@ -103,6 +103,8 @@ def test_function_list_warns_when_output_auto_spills(monkeypatch, capsys):
                 "artifact_path": "/tmp/functions.txt",
                 "bytes": 1234,
                 "format": "text",
+                "sha256": "deadbeef",
+                "summary": {"kind": "string", "chars": 42},
                 "tokenizer": "o200k_base",
                 "tokens": 23456,
             },
@@ -115,12 +117,18 @@ def test_function_list_warns_when_output_auto_spills(monkeypatch, capsys):
 
     assert rc == 0
     stdout, stderr = capsys.readouterr()
-    assert '"artifact_path":"/tmp/functions.txt"' in stdout
+    assert stdout == ""
     assert captured["value"] == "0x401000  sub_401000\n0x402000  sub_402000"
-    assert "warning: function list output spilled to /tmp/functions.txt" in stderr
-    assert "tokens=23456" in stderr
-    assert "items=2" in stderr
-    assert "lines=2" in stderr
+    assert "warning: function list output spilled" in stderr
+    assert "path: /tmp/functions.txt" in stderr
+    assert "format: text" in stderr
+    assert "bytes: 1234" in stderr
+    assert "tokens: 23456" in stderr
+    assert "tokenizer: o200k_base" in stderr
+    assert "sha256: deadbeef" in stderr
+    assert "summary: kind=string, chars=42" in stderr
+    assert "items: 2" in stderr
+    assert "lines: 2" in stderr
 
 
 def test_function_list_forwards_address_filters(monkeypatch, capsys):

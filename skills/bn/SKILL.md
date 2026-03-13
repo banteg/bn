@@ -28,7 +28,7 @@ Use `bn doctor` when bridge state is unclear or `bn target list` does not show w
 - Mutation, preview, setup, and export commands default to `json`.
 - Other options: `--format json`, `--format ndjson`, `--out <path>`.
 
-Outputs above `10_000` `o200k_base` tokens auto-spill to disk. When that happens, stdout is a JSON envelope, not the full body, so do not chain `bn ... | rg ...` and expect to search the real output. Use `--out <path>` when you want the full body written to a known file.
+Outputs above `10_000` `o200k_base` tokens auto-spill to disk. When that happens, stdout is empty and stderr carries the spill metadata as plain text, so do not chain `bn ... | rg ...` and expect to search the real output. Use `--out <path>` when you want the full body written to a known file.
 
 ## High-Value Read Commands
 
