@@ -1,6 +1,6 @@
 [project]
 name = "bn"
-version = "0.12.2"
+version = "0.12.3"
 description = "Agent-friendly Binary Ninja CLI with a GUI companion bridge"
 readme = "README.md"
 authors = [

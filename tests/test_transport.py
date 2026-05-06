@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import errno
 import socket
 import socketserver
 import threading
@@ -102,6 +103,47 @@ def test_list_instances_prunes_stale_registry_and_socket(tmp_path, monkeypatch):
     assert instances == []
     assert not registry_path.exists()
     assert stale_socket_path.exists()
+
+
+def test_list_instances_preserves_permission_denied_registry(tmp_path, monkeypatch):
+    monkeypatch.setenv("BN_CACHE_DIR", str(tmp_path))
+    registry_path = bridge_registry_path()
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    socket_path = tmp_path / "bridge.sock"
+    socket_path.write_text("", encoding="utf-8")
+    registry_path.write_text(
+        json.dumps(
+            {
+                "pid": os.getpid(),
+                "socket_path": str(socket_path),
+                "plugin_name": "bn_agent_bridge",
+                "plugin_version": "0.1.0",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _DeniedSocket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def settimeout(self, timeout):
+            self.timeout = timeout
+
+        def connect(self, path):
+            raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr("bn.transport.socket.socket", lambda *args, **kwargs: _DeniedSocket())
+
+    instances = list_instances()
+
+    assert len(instances) == 1
+    assert instances[0].socket_path == socket_path
+    assert "Operation not permitted" in instances[0].meta["socket_probe_error"]
+    assert registry_path.exists()
 
 
 def test_send_request_wraps_socket_errors(tmp_path, monkeypatch):

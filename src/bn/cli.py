@@ -710,7 +710,24 @@ def _render_doctor_text(value: Any) -> str:
         error = doctor.get("error")
         if error:
             lines.append(f"  error: {error}")
+        sandbox_hint = item.get("sandbox_hint")
+        if sandbox_hint:
+            lines.append(f"  hint: {sandbox_hint}")
     return "\n".join(lines)
+
+
+def _sandbox_socket_hint(instance: Any, error: str) -> str | None:
+    if not os.environ.get("CODEX_SANDBOX"):
+        return None
+    lowered = error.lower()
+    if "operation not permitted" not in lowered and "permission denied" not in lowered:
+        return None
+    return (
+        "Codex sandbox blocked the Binary Ninja bridge socket at "
+        f"{instance.socket_path}. `bn` must run outside the Codex sandbox to reach the "
+        "live Binary Ninja GUI bridge. Add `prefix_rule(pattern=[\"bn\"], decision=\"allow\")` "
+        "to `~/.codex/rules/default.rules`, then restart Codex or reload rules."
+    )
 
 
 def _format_operation_result(item: dict[str, Any]) -> str:
@@ -867,30 +884,32 @@ def _doctor(args: argparse.Namespace) -> int:
             ping = response["result"]
         except Exception as exc:
             ping = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        sandbox_hint = _sandbox_socket_hint(instance, str(ping.get("error", "")))
 
         loaded_version = ping.get("plugin_version") if isinstance(ping, dict) else None
         loaded_build_id = ping.get("plugin_build_id") if isinstance(ping, dict) else None
-        instances.append(
-            {
-                "pid": instance.pid,
-                "socket_path": str(instance.socket_path),
-                "plugin_version": instance.plugin_version,
-                "plugin_build_id": loaded_build_id,
-                "installed_plugin_build_id": install_build_id,
-                "source_plugin_build_id": source_build_id,
-                "stale_plugin_version": (
-                    bool(loaded_version)
-                    and str(loaded_version) != _package_version()
-                ),
-                "stale_plugin_code": (
-                    bool(loaded_build_id)
-                    and install_build_id is not None
-                    and loaded_build_id != install_build_id
-                ),
-                "started_at": instance.started_at,
-                "doctor": ping,
-            }
-        )
+        instance_info = {
+            "pid": instance.pid,
+            "socket_path": str(instance.socket_path),
+            "plugin_version": instance.plugin_version,
+            "plugin_build_id": loaded_build_id,
+            "installed_plugin_build_id": install_build_id,
+            "source_plugin_build_id": source_build_id,
+            "stale_plugin_version": (
+                bool(loaded_version)
+                and str(loaded_version) != _package_version()
+            ),
+            "stale_plugin_code": (
+                bool(loaded_build_id)
+                and install_build_id is not None
+                and loaded_build_id != install_build_id
+            ),
+            "started_at": instance.started_at,
+            "doctor": ping,
+        }
+        if sandbox_hint:
+            instance_info["sandbox_hint"] = sandbox_hint
+        instances.append(instance_info)
 
     result = {
         "cli_version": _package_version(),

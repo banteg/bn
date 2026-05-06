@@ -1085,6 +1085,47 @@ def test_doctor_text_marks_healthy_instance_ok(monkeypatch, tmp_path, capsys):
     assert "status=error" not in output
 
 
+def test_doctor_reports_codex_sandbox_socket_denial(monkeypatch, tmp_path, capsys):
+    install_dir = tmp_path / "install"
+    source_dir = tmp_path / "source"
+    install_dir.mkdir()
+    source_dir.mkdir()
+    (install_dir / "bridge.py").write_text("print('new build')\n", encoding="utf-8")
+    (source_dir / "bridge.py").write_text("print('new build')\n", encoding="utf-8")
+
+    fake_instance = type(
+        "FakeInstance",
+        (),
+        {
+            "pid": 123,
+            "socket_path": tmp_path / "bridge.sock",
+            "plugin_version": bn.cli.VERSION,
+            "started_at": "2026-03-09T00:00:00+00:00",
+        },
+    )()
+
+    monkeypatch.setenv("CODEX_SANDBOX", "seatbelt")
+    monkeypatch.setattr(bn.cli, "list_instances", lambda: [fake_instance])
+    monkeypatch.setattr(bn.cli, "plugin_install_dir", lambda: install_dir)
+    monkeypatch.setattr(bn.cli, "plugin_source_dir", lambda: source_dir)
+    monkeypatch.setattr(
+        bn.cli,
+        "_send_request_to_instance",
+        lambda instance, op, params=None, target=None: (_ for _ in ()).throw(
+            bn.cli.BridgeError("Failed to contact bridge: [Errno 1] Operation not permitted")
+        ),
+    )
+
+    rc = bn.cli.main(["doctor", "--format", "json"])
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    hint = payload["instances"][0]["sandbox_hint"]
+    assert "Codex sandbox blocked" in hint
+    assert 'prefix_rule(pattern=["bn"], decision="allow")' in hint
+    assert "~/.codex/rules/default.rules" in hint
+
+
 def test_symbol_rename_text_format_renders_mutation_summary(monkeypatch, capsys):
     def fake_send_request(op, *, params=None, target=None, timeout=30.0):
         assert op == "rename_symbol"

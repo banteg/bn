@@ -304,6 +304,18 @@ If `bn target list` is empty:
 - make sure the plugin is installed with `bn plugin install`
 - reload Binary Ninja plugins or restart Binary Ninja after plugin changes
 
+If `bn doctor` sees a bridge registry but reports `Operation not permitted` under Codex,
+the Codex sandbox is blocking the Unix socket that connects to the live Binary Ninja GUI
+process. Let Codex run `bn` outside the sandbox by adding this rule to
+`~/.codex/rules/default.rules`:
+
+```text
+prefix_rule(pattern=["bn"], decision="allow")
+```
+
+Restart Codex or reload rules after editing the file. This is only needed for Codex
+sandboxed runs; normal shells can use `bn` without that rule.
+
 If multiple targets are open, omitted `--target` is rejected. Pass `--target <selector>` from `bn target list`, or use `--target active` only when you intentionally want the GUI-selected target.
 
 If decompile text still looks stale after a type change, run:

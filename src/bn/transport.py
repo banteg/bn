@@ -22,6 +22,11 @@ TRANSIENT_SOCKET_ERRNOS = {
     errno.ENOENT,
 }
 
+DENIED_SOCKET_ERRNOS = {
+    errno.EACCES,
+    errno.EPERM,
+}
+
 
 @dataclass(slots=True)
 class BridgeInstance:
@@ -39,14 +44,14 @@ def _purge_stale_registry(registry_path: Path) -> None:
         registry_path.unlink()
 
 
-def _socket_is_live(socket_path: Path, timeout: float = 0.2) -> bool:
+def _socket_probe_error(socket_path: Path, timeout: float = 0.2) -> OSError | None:
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
             sock.settimeout(timeout)
             sock.connect(str(socket_path))
-        return True
-    except OSError:
-        return False
+        return None
+    except OSError as exc:
+        return exc
 
 
 def _load_instance(path: Path) -> BridgeInstance | None:
@@ -61,7 +66,10 @@ def _load_instance(path: Path) -> BridgeInstance | None:
         _purge_stale_registry(path)
         return None
 
-    if not _socket_is_live(socket_path):
+    probe_error = _socket_probe_error(socket_path)
+    if probe_error is not None and probe_error.errno in DENIED_SOCKET_ERRNOS:
+        payload["socket_probe_error"] = str(probe_error)
+    elif probe_error is not None:
         _purge_stale_registry(path)
         return None
 
