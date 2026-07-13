@@ -4,6 +4,8 @@
 
 `bn` is a coding agent-first CLI for Binary Ninja. It gives a shell session or tool-calling agent stable commands, structured output, and access to the same live Binary Ninja database you already have open in the GUI.
 
+See the [changelog](CHANGELOG.md) for release notes by version and date.
+
 ## Headline Features
 
 - Query live Binary Ninja state from the shell: targets, functions, callsites, decompile text, IL, disassembly, xrefs, types, strings, imports, and reusable bundles.
