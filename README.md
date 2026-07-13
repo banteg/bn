@@ -124,8 +124,6 @@ If `--out` is set, the command writes the rendered result to that path and print
 
 Use `--match` when an agent only needs a few lines from otherwise large text output. Use `--no-spill` when a downstream process must consume stdout directly and is prepared for the full result.
 
-The only exception is `bn bundle function`, which writes the bundle artifact from inside the bridge and prints the envelope back to the CLI.
-
 `bn function list` and `bn function search` return the full matching set for the selected target or address range. Large results auto-spill to an artifact instead of forcing manual pagination. Spill is token-based and currently triggers above 10,000 tokens. When that happens, stdout stays empty and stderr carries the spill metadata as plain text, including the artifact path and size counts.
 
 ## Extraction Commands

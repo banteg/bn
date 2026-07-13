@@ -941,27 +941,19 @@ def test_local_list_renders_ids(monkeypatch, capsys):
     assert "id=0x401000:param:StackVariableSourceType:4:0:1" in output
 
 
-def test_bundle_function_out_path_is_bridge_owned(monkeypatch, tmp_path, capsys):
+def test_bundle_function_out_path_uses_standard_output_pipeline(monkeypatch, tmp_path, capsys):
     captured = {}
     out_path = tmp_path / "bundle.json"
 
     def fake_send_request(op, *, params=None, target=None, timeout=30.0):
-        if op == "list_targets":
-            return {
-                "ok": True,
-                "result": [{"target_id": "123:1:7", "selector": "SnailMail_unwrapped.exe.bndb"}],
-            }
         captured["op"] = op
         captured["params"] = params
+        captured["target"] = target
         return {
             "ok": True,
             "result": {
-                "ok": True,
-                "artifact_path": str(out_path),
-                "format": "json",
-                "bytes": 123,
-                "sha256": "deadbeef",
-                "summary": {"kind": "object", "count": 3},
+                "target": {"selector": "SnailMail_unwrapped.exe.bndb"},
+                "function": {"name": "sub_401000", "address": "0x401000"},
             },
         }
 
@@ -971,10 +963,12 @@ def test_bundle_function_out_path_is_bridge_owned(monkeypatch, tmp_path, capsys)
 
     assert rc == 0
     assert captured["op"] == "bundle_function"
-    assert captured["params"]["out_path"] == str(out_path)
-    assert not out_path.exists()
+    assert captured["params"] == {"identifier": "sub_401000"}
+    assert captured["target"] is None
+    assert json.loads(out_path.read_text())["function"]["name"] == "sub_401000"
     payload = json.loads(capsys.readouterr().out)
     assert payload["artifact_path"] == str(out_path)
+    assert payload["tokens"] > 0
 
 
 def test_removed_experimental_commands_are_not_present():

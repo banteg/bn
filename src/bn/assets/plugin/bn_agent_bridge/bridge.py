@@ -4,7 +4,6 @@ import atexit
 import contextlib
 import difflib
 import errno
-import hashlib
 import io
 import json
 import os
@@ -233,34 +232,6 @@ def _parse_address(value: Any) -> int:
     if text.lower().startswith("0x"):
         return int(text, 16)
     return int(text, 10)
-
-
-def _artifact_summary(value: Any) -> dict[str, Any]:
-    if isinstance(value, dict):
-        return {"kind": "object", "keys": sorted(value.keys())[:10], "count": len(value)}
-    if isinstance(value, list):
-        return {"kind": "array", "count": len(value)}
-    if isinstance(value, str):
-        return {"kind": "string", "chars": len(value)}
-    return {"kind": type(value).__name__}
-
-
-def _write_json_artifact(path_text: str | None, payload: Any) -> dict[str, Any] | None:
-    if not path_text:
-        return None
-
-    path = Path(path_text).expanduser()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    data = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
-    path.write_bytes(data)
-    return {
-        "ok": True,
-        "artifact_path": str(path),
-        "format": "json",
-        "bytes": len(data),
-        "sha256": hashlib.sha256(data).hexdigest(),
-        "summary": _artifact_summary(payload),
-    }
 
 
 def _active_binary_view():
@@ -761,7 +732,7 @@ class BinaryNinjaBridge:
         if op == "imports":
             return self._imports(target)
         if op == "bundle_function":
-            return self._bundle_function(target, params["identifier"], params.get("out_path"))
+            return self._bundle_function(target, params["identifier"])
         if op == "py_exec":
             return self._py_exec(target, str(params["script"]))
 
@@ -2582,7 +2553,7 @@ class BinaryNinjaBridge:
             "has_comment": bool(comment),
         }
 
-    def _bundle_function(self, selector: str | None, identifier, out_path: str | None):
+    def _bundle_function(self, selector: str | None, identifier):
         bv = self._resolve_view(selector)
         func = self._find_function(bv, identifier)
         decompile = self._function_text(bv, func, view="hlil")
@@ -2605,8 +2576,7 @@ class BinaryNinjaBridge:
             "comments": dict(sorted(self._comment_map(bv, func).items())),
             "xrefs": self._xrefs_to_address(bv, func.start),
         }
-        artifact = _write_json_artifact(out_path, bundle)
-        return artifact or bundle
+        return bundle
 
     def _normalize_py_result(self, value: Any) -> tuple[Any, list[str]]:
         def normalize(item: Any) -> Any:

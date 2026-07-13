@@ -302,7 +302,6 @@ def _call(
     page_label: str | None = None,
     stem: str,
     result_exit_code: Callable[[Any], int] | None = None,
-    bridge_writes_output: bool = False,
 ) -> int:
     request_params = dict(params or {})
     effective_page_limit = None
@@ -346,7 +345,7 @@ def _call(
     _render_result(
         result,
         fmt=args.format,
-        out_path=None if bridge_writes_output else args.out,
+        out_path=args.out,
         stem=stem,
         spill_label=page_label or op.replace("_", " "),
         spill_context=spill_context,
@@ -1437,9 +1436,8 @@ def _bundle_function(args: argparse.Namespace) -> int:
     return _call(
         args,
         "bundle_function",
-        {"identifier": args.identifier, "out_path": str(args.out) if args.out else None},
+        {"identifier": args.identifier},
         stem="function-bundle",
-        bridge_writes_output=bool(args.out),
     )
 
 
