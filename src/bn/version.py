@@ -4,7 +4,7 @@ import hashlib
 from pathlib import Path
 
 
-VERSION = "0.12.3"
+VERSION = "0.13.0"
 PROTOCOL_VERSION = 1
 
 
