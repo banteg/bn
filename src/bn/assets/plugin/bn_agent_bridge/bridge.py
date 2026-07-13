@@ -17,7 +17,7 @@ import weakref
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import binaryninja as bn
 from binaryninja.mainthread import execute_on_main_thread_and_wait, is_main_thread
@@ -124,83 +124,6 @@ class _PythonContext:
         resolved = self.address(address)
         data = bytes(self.bv.read(resolved, int(max_length)))
         return data.split(b"\0", 1)[0].decode("utf-8", errors="replace")
-
-
-class _ReadWriteLock:
-    def __init__(self):
-        self._condition = threading.Condition()
-        self._readers = 0
-        self._writer = False
-
-    @contextlib.contextmanager
-    def read(self):
-        with self._condition:
-            while self._writer:
-                self._condition.wait()
-            self._readers += 1
-        try:
-            yield
-        finally:
-            with self._condition:
-                self._readers -= 1
-                if self._readers == 0:
-                    self._condition.notify_all()
-
-    @contextlib.contextmanager
-    def write(self):
-        with self._condition:
-            while self._writer or self._readers:
-                self._condition.wait()
-            self._writer = True
-        try:
-            yield
-        finally:
-            with self._condition:
-                self._writer = False
-                self._condition.notify_all()
-
-
-READ_LOCKED_OPS = {
-    "address_info",
-    "data_read",
-    "function_containing",
-    "function_info",
-    "get_prototype",
-    "list_functions",
-    "list_locals",
-    "search_functions",
-    "callsites",
-    "decompile",
-    "il",
-    "disasm",
-    "xrefs",
-    "refs_from",
-    "field_xrefs",
-    "search_text",
-    "search_constant",
-    "types",
-    "type_info",
-    "strings",
-    "imports",
-    "bundle_function",
-    "get_comment",
-}
-
-
-WRITE_LOCKED_OPS = {
-    "py_exec",
-    "rename_symbol",
-    "set_comment",
-    "delete_comment",
-    "set_prototype",
-    "local_rename",
-    "local_retype",
-    "struct_field_set",
-    "struct_field_rename",
-    "struct_field_delete",
-    "types_declare",
-    "refresh",
-}
 
 
 def _run_on_main_thread(func):
@@ -461,8 +384,7 @@ class TargetManager:
             if len(targets) != 1:
                 raise OperationFailure(
                     "target_required",
-                    "This command requires --target when multiple targets are open.\n"
-                    f"Open targets:\n{_render_target_choices(targets)}",
+                    f"This command requires --target when multiple targets are open.\nOpen targets:\n{_render_target_choices(targets)}",
                     observed={"targets": targets},
                 )
             selector = str(targets[0]["target_id"])
@@ -472,8 +394,7 @@ class TargetManager:
             if active is None:
                 raise OperationFailure(
                     "target_required",
-                    "No active BinaryView is selected; pass an explicit --target.\n"
-                    f"Open targets:\n{_render_target_choices(targets)}",
+                    f"No active BinaryView is selected; pass an explicit --target.\nOpen targets:\n{_render_target_choices(targets)}",
                     requested={"target": "active"},
                     observed={"targets": targets},
                 )
@@ -549,7 +470,7 @@ class BinaryNinjaBridge:
         self.registry_path = bridge_registry_path()
         self._server: ThreadedUnixServer | None = None
         self._thread: threading.Thread | None = None
-        self._target_lock = _ReadWriteLock()
+        self._request_lock = threading.RLock()
 
     def start(self):  # pragma: no cover - requires GUI runtime
         self.socket_path.parent.mkdir(parents=True, exist_ok=True)
@@ -600,13 +521,15 @@ class BinaryNinjaBridge:
                     requested={"protocol_version": request_protocol},
                     observed={"protocol_version": PROTOCOL_VERSION},
                 )
-            lock = contextlib.nullcontext()
-            if op in WRITE_LOCKED_OPS:
-                lock = self._target_lock.write()
-            elif op in READ_LOCKED_OPS:
-                lock = self._target_lock.read()
-            with lock:
-                result = self._dispatch_on_main(op, params, target)
+            handler = self._operation_handlers().get(str(op))
+            if handler is None:
+                raise OperationFailure(
+                    "unknown_operation",
+                    f"Unknown operation: {op}",
+                    requested={"op": op},
+                )
+            with self._request_lock:
+                result = handler(params, target)
             return _json_response(ok=True, result=result)
         except OperationFailure as exc:
             return _json_response(
@@ -627,147 +550,123 @@ class BinaryNinjaBridge:
                 },
             )
 
-    def _dispatch_on_main(self, op: str, params: dict[str, Any], target: str | None):
-        if op == "doctor":
-            return self._doctor()
-        if op == "list_targets":
-            return self.targets.refresh()
-        if op == "target_info":
-            return self._target_info(params.get("selector") or target)
-        if op == "refresh":
-            return self._refresh(target)
+    def _operation_handlers(
+        self,
+    ) -> dict[str, Callable[[dict[str, Any], str | None], Any]]:
+        def mutation(name: str) -> Callable[[dict[str, Any], str | None], Any]:
+            return lambda params, target: self._mutation(
+                target,
+                bool(params.get("preview")),
+                {**params, "op": name},
+            )
 
-        if op == "address_info":
-            return self._address_info(target, params["address"])
-        if op == "data_read":
-            return self._data_read(
+        return {
+            "doctor": lambda _params, _target: self._doctor(),
+            "list_targets": lambda _params, _target: self.targets.refresh(),
+            "target_info": lambda params, target: self._target_info(params.get("selector") or target),
+            "refresh": lambda _params, target: self._refresh(target),
+            "address_info": lambda params, target: self._address_info(target, params["address"]),
+            "data_read": lambda params, target: self._data_read(
                 target,
                 params["address"],
                 value_type=str(params.get("type", "bytes")),
                 count=params.get("count"),
-            )
-
-        if op == "list_functions":
-            return self._list_functions(
+            ),
+            "list_functions": lambda params, target: self._list_functions(
                 target,
                 min_address=params.get("min_address"),
                 max_address=params.get("max_address"),
-            )
-        if op == "search_functions":
-            return self._search_functions(
+            ),
+            "search_functions": lambda params, target: self._search_functions(
                 target,
                 str(params.get("query", "")),
                 regex=bool(params.get("regex", False)),
                 min_address=params.get("min_address"),
                 max_address=params.get("max_address"),
-            )
-        if op == "callsites":
-            return self._callsites(
+            ),
+            "callsites": lambda params, target: self._callsites(
                 target,
                 str(params["callee"]),
                 within_identifiers=list(params.get("within_identifiers") or []),
                 context=int(params.get("context", 3)),
-            )
-        if op == "function_info":
-            return self._function_info(target, params["identifier"])
-        if op == "function_containing":
-            return self._function_containing(target, params["address"])
-        if op == "get_prototype":
-            return self._get_prototype(target, params["identifier"])
-        if op == "list_locals":
-            return self._list_locals_for_function(target, params["identifier"])
-        if op == "decompile":
-            return self._decompile(target, params["identifier"])
-        if op == "il":
-            return self._il(target, params["identifier"], str(params.get("view", "hlil")), bool(params.get("ssa")))
-        if op == "disasm":
-            return self._disasm(
+            ),
+            "function_info": lambda params, target: self._function_info(target, params["identifier"]),
+            "function_containing": lambda params, target: self._function_containing(target, params["address"]),
+            "get_prototype": lambda params, target: self._get_prototype(target, params["identifier"]),
+            "list_locals": lambda params, target: self._list_locals_for_function(target, params["identifier"]),
+            "decompile": lambda params, target: self._decompile(target, params["identifier"]),
+            "il": lambda params, target: self._il(
+                target,
+                params["identifier"],
+                str(params.get("view", "hlil")),
+                bool(params.get("ssa")),
+            ),
+            "disasm": lambda params, target: self._disasm(
                 target,
                 params["identifier"],
                 before=params.get("before"),
                 after=params.get("after"),
-            )
-        if op == "xrefs":
-            return self._xrefs(target, params["identifier"])
-        if op == "refs_from":
-            return self._refs_from(target, params["identifier"])
-        if op == "field_xrefs":
-            return self._field_xrefs(target, str(params["field"]))
-        if op == "search_text":
-            return self._search_text(
+            ),
+            "xrefs": lambda params, target: self._xrefs(target, params["identifier"]),
+            "refs_from": lambda params, target: self._refs_from(target, params["identifier"]),
+            "field_xrefs": lambda params, target: self._field_xrefs(target, str(params["field"])),
+            "search_text": lambda params, target: self._search_text(
                 target,
                 str(params.get("query", "")),
                 view=str(params.get("view", "hlil")),
                 regex=bool(params.get("regex")),
                 max_results=int(params.get("max_results", 200)),
                 max_seconds=float(params.get("max_seconds", 5.0)),
-            )
-        if op == "search_constant":
-            return self._search_constant(
+            ),
+            "search_constant": lambda params, target: self._search_constant(
                 target,
                 params["value"],
                 max_results=int(params.get("max_results", 200)),
                 max_seconds=float(params.get("max_seconds", 5.0)),
-            )
-        if op == "types":
-            return self._types(
+            ),
+            "types": lambda params, target: self._types(
                 target,
                 query=params.get("query"),
                 offset=int(params.get("offset", 0)),
                 limit=int(params.get("limit", 100)),
-            )
-        if op == "type_info":
-            return self._type_info(
+            ),
+            "type_info": lambda params, target: self._type_info(
                 target,
                 str(params["type_name"]),
                 require_struct=bool(params.get("require_struct")),
-            )
-        if op == "strings":
-            return self._strings(
+            ),
+            "strings": lambda params, target: self._strings(
                 target,
                 query=params.get("query"),
                 offset=int(params.get("offset", 0)),
                 limit=int(params.get("limit", 100)),
-            )
-        if op == "imports":
-            return self._imports(target)
-        if op == "bundle_function":
-            return self._bundle_function(target, params["identifier"])
-        if op == "py_exec":
-            return self._py_exec(target, str(params["script"]))
-
-        if op == "rename_symbol":
-            return self._mutation(target, bool(params.get("preview")), {"op": "rename_symbol", **params})
-        if op == "get_comment":
-            return self._get_comment(target, params.get("address"), params.get("function"))
-        if op == "set_comment":
-            return self._mutation(target, bool(params.get("preview")), {"op": "set_comment", **params})
-        if op == "delete_comment":
-            return self._mutation(target, bool(params.get("preview")), {"op": "delete_comment", **params})
-        if op == "set_prototype":
-            return self._mutation(target, bool(params.get("preview")), {"op": "set_prototype", **params})
-        if op == "local_rename":
-            return self._mutation(target, bool(params.get("preview")), {"op": "local_rename", **params})
-        if op == "local_retype":
-            return self._mutation(target, bool(params.get("preview")), {"op": "local_retype", **params})
-        if op == "struct_field_set":
-            return self._mutation(target, bool(params.get("preview")), {"op": "struct_field_set", **params})
-        if op == "struct_field_rename":
-            return self._mutation(target, bool(params.get("preview")), {"op": "struct_field_rename", **params})
-        if op == "struct_field_delete":
-            return self._mutation(target, bool(params.get("preview")), {"op": "struct_field_delete", **params})
-        if op == "types_declare":
-            return self._mutation(target, bool(params.get("preview")), {"op": "types_declare", **params})
-        raise ValueError(f"Unknown operation: {op}")
+            ),
+            "imports": lambda _params, target: self._imports(target),
+            "bundle_function": lambda params, target: self._bundle_function(target, params["identifier"]),
+            "py_exec": lambda params, target: self._py_exec(target, str(params["script"])),
+            "get_comment": lambda params, target: self._get_comment(
+                target,
+                params.get("address"),
+                params.get("function"),
+            ),
+            **{
+                name: mutation(name)
+                for name in (
+                    "rename_symbol",
+                    "set_comment",
+                    "delete_comment",
+                    "set_prototype",
+                    "local_rename",
+                    "local_retype",
+                    "struct_field_set",
+                    "struct_field_rename",
+                    "struct_field_delete",
+                    "types_declare",
+                )
+            },
+        }
 
     def _doctor(self):
-        operations = {
-            "doctor",
-            "list_targets",
-            "target_info",
-            *READ_LOCKED_OPS,
-            *WRITE_LOCKED_OPS,
-        }
         return {
             "plugin_name": PLUGIN_NAME,
             "plugin_version": VERSION,
@@ -777,7 +676,7 @@ class BinaryNinjaBridge:
             "socket_path": str(self.socket_path),
             "targets": self.targets.refresh(),
             "capabilities": {
-                "operations": sorted(operations),
+                "operations": sorted(self._operation_handlers()),
                 "structured_errors": True,
                 "schema_command": True,
                 "global_target": True,
@@ -916,7 +815,10 @@ class BinaryNinjaBridge:
             folded = text.lower()
             candidates = []
             for symbol in list(bv.get_symbols()):
-                names = [str(getattr(symbol, "name", "")), str(getattr(symbol, "raw_name", ""))]
+                names = [
+                    str(getattr(symbol, "name", "")),
+                    str(getattr(symbol, "raw_name", "")),
+                ]
                 if folded in {name.lower() for name in names if name}:
                     candidates.append(symbol)
 
@@ -1082,10 +984,16 @@ class BinaryNinjaBridge:
 
         pointer_width = int(getattr(bv, "address_size", 8))
         widths = {
-            "u8": 1, "i8": 1,
-            "u16": 2, "i16": 2,
-            "u32": 4, "i32": 4, "f32": 4,
-            "u64": 8, "i64": 8, "f64": 8,
+            "u8": 1,
+            "i8": 1,
+            "u16": 2,
+            "i16": 2,
+            "u32": 4,
+            "i32": 4,
+            "f32": 4,
+            "u64": 8,
+            "i64": 8,
+            "f64": 8,
             "ptr": pointer_width,
         }
         width = widths.get(value_type)
@@ -1129,7 +1037,11 @@ class BinaryNinjaBridge:
             symbol = bv.get_symbol_at(address)
             if kind == "function":
                 if fn is None:
-                    raise OperationFailure("unsupported", f"Function not found: {identifier}", requested=requested)
+                    raise OperationFailure(
+                        "unsupported",
+                        f"Function not found: {identifier}",
+                        requested=requested,
+                    )
                 return {
                     "kind": "function",
                     "address": int(fn.start),
@@ -1163,7 +1075,11 @@ class BinaryNinjaBridge:
                     "before_name": str(fn.name),
                 }
             if len(exact_functions) > 1:
-                raise OperationFailure("unsupported", f"Ambiguous function identifier: {identifier}", requested=requested)
+                raise OperationFailure(
+                    "unsupported",
+                    f"Ambiguous function identifier: {identifier}",
+                    requested=requested,
+                )
 
             folded_functions = self._find_functions_by_name(bv, str(identifier), case_sensitive=False)
             if len(folded_functions) == 1:
@@ -1174,7 +1090,11 @@ class BinaryNinjaBridge:
                     "before_name": str(fn.name),
                 }
             if len(folded_functions) > 1:
-                raise OperationFailure("unsupported", f"Ambiguous function identifier: {identifier}", requested=requested)
+                raise OperationFailure(
+                    "unsupported",
+                    f"Ambiguous function identifier: {identifier}",
+                    requested=requested,
+                )
 
         if kind == "function":
             raise OperationFailure("unsupported", f"Function not found: {identifier}", requested=requested)
@@ -1192,7 +1112,11 @@ class BinaryNinjaBridge:
                 "before_name": str(symbol.name),
             }
         if len(exact_symbols) > 1:
-            raise OperationFailure("unsupported", f"Ambiguous symbol identifier: {identifier}", requested=requested)
+            raise OperationFailure(
+                "unsupported",
+                f"Ambiguous symbol identifier: {identifier}",
+                requested=requested,
+            )
 
         folded_symbols = [
             symbol
@@ -1207,7 +1131,11 @@ class BinaryNinjaBridge:
                 "before_name": str(symbol.name),
             }
         if len(folded_symbols) > 1:
-            raise OperationFailure("unsupported", f"Ambiguous symbol identifier: {identifier}", requested=requested)
+            raise OperationFailure(
+                "unsupported",
+                f"Ambiguous symbol identifier: {identifier}",
+                requested=requested,
+            )
 
         raise OperationFailure("unsupported", f"Symbol not found: {identifier}", requested=requested)
 
@@ -1382,8 +1310,7 @@ class BinaryNinjaBridge:
 
     def _list_locals(self, func) -> list[dict[str, Any]]:
         variables = [
-            self._variable_entry(func, var, is_parameter=is_parameter)
-            for var, is_parameter in self._iter_canonical_variables(func)
+            self._variable_entry(func, var, is_parameter=is_parameter) for var, is_parameter in self._iter_canonical_variables(func)
         ]
         return self._sort_variable_entries(variables)
 
@@ -1397,7 +1324,10 @@ class BinaryNinjaBridge:
     def _find_variable_selector(self, func, selector: str) -> tuple[Any, bool]:
         locals_by_id: dict[str, tuple[Any, bool]] = {}
         for var, is_parameter in self._iter_canonical_variables(func):
-            locals_by_id[self._local_id(func, var, is_parameter=is_parameter)] = (var, is_parameter)
+            locals_by_id[self._local_id(func, var, is_parameter=is_parameter)] = (
+                var,
+                is_parameter,
+            )
         if selector in locals_by_id:
             return locals_by_id[selector]
 
@@ -1508,7 +1438,10 @@ class BinaryNinjaBridge:
             if candidate is None:
                 return
             expr_index = getattr(candidate, "expr_index", None)
-            marker = (type(candidate).__name__, int(expr_index) if expr_index is not None else id(candidate))
+            marker = (
+                type(candidate).__name__,
+                int(expr_index) if expr_index is not None else id(candidate),
+            )
             if marker in seen:
                 return
             seen.add(marker)
@@ -1700,9 +1633,7 @@ class BinaryNinjaBridge:
 
     def _callsites_within_function(self, bv, callee, func, *, context: int) -> list[dict[str, Any]]:
         disasm_entries = self._structured_disasm_entries(bv, func)
-        index_by_addr = {
-            int(item["_address_int"]): index for index, item in enumerate(disasm_entries)
-        }
+        index_by_addr = {int(item["_address_int"]): index for index, item in enumerate(disasm_entries)}
         callee_address = int(callee.start)
         rows = []
         for insn in self._iter_llil_instructions(func):
@@ -1861,7 +1792,11 @@ class BinaryNinjaBridge:
     ):
         bv = self._resolve_view(selector)
         items = [
-            {"name": fn.name, "address": hex(fn.start), "raw_name": getattr(fn, "raw_name", fn.name)}
+            {
+                "name": fn.name,
+                "address": hex(fn.start),
+                "raw_name": getattr(fn, "raw_name", fn.name),
+            }
             for fn in self._filtered_functions(bv, min_address=min_address, max_address=max_address)
         ]
         return items
@@ -1894,7 +1829,13 @@ class BinaryNinjaBridge:
 
         for fn in self._filtered_functions(bv, min_address=min_address, max_address=max_address):
             if matches(fn.name):
-                items.append({"name": fn.name, "address": hex(fn.start), "raw_name": getattr(fn, "raw_name", fn.name)})
+                items.append(
+                    {
+                        "name": fn.name,
+                        "address": hex(fn.start),
+                        "raw_name": getattr(fn, "raw_name", fn.name),
+                    }
+                )
         return items
 
     def _decompile(self, selector: str | None, identifier):
@@ -2387,9 +2328,7 @@ class BinaryNinjaBridge:
             return field_info(member, index)
 
         folded_matches = [
-            (index, member)
-            for index, member in enumerate(member_list)
-            if str(getattr(member, "name", "")).lower() == field_name.lower()
+            (index, member) for index, member in enumerate(member_list) if str(getattr(member, "name", "")).lower() == field_name.lower()
         ]
         if len(folded_matches) == 1:
             index, member = folded_matches[0]
@@ -2409,9 +2348,7 @@ class BinaryNinjaBridge:
         available = [str(getattr(member, "name", "")) for member in member_list if str(getattr(member, "name", ""))]
         suggestions = difflib.get_close_matches(field_name, available, n=5, cutoff=0.5)
         if suggestions:
-            raise RuntimeError(
-                f"Field not found: {resolved_name}.{field_name}. Did you mean: {', '.join(suggestions)}"
-            )
+            raise RuntimeError(f"Field not found: {resolved_name}.{field_name}. Did you mean: {', '.join(suggestions)}")
         raise RuntimeError(f"Field not found: {resolved_name}.{field_name}")
 
     def _field_xrefs(self, selector: str | None, field_spec: str):
@@ -2691,11 +2628,14 @@ class BinaryNinjaBridge:
         if kind.startswith("struct_") and op.get("struct_name"):
             return [str(op["struct_name"])]
         if kind == "types_declare":
-            return [name for name, _ in self._parse_declaration_source(
-                bv,
-                str(op["declaration"]),
-                source_path=op.get("source_path"),
-            )["types"]]
+            return [
+                name
+                for name, _ in self._parse_declaration_source(
+                    bv,
+                    str(op["declaration"]),
+                    source_path=op.get("source_path"),
+                )["types"]
+            ]
         return []
 
     def _guess_affected_functions(self, bv, operation: dict[str, Any]):
@@ -2824,7 +2764,14 @@ class BinaryNinjaBridge:
             }
         return snapshots
 
-    def _snippet_for_change(self, before_text: str, after_text: str, *, context_lines: int = 3, max_lines: int = 10):
+    def _snippet_for_change(
+        self,
+        before_text: str,
+        after_text: str,
+        *,
+        context_lines: int = 3,
+        max_lines: int = 10,
+    ):
         before_lines = before_text.splitlines()
         after_lines = after_text.splitlines()
         line_count = max(len(before_lines), len(after_lines))
@@ -2939,7 +2886,11 @@ class BinaryNinjaBridge:
                 return self._verify_struct_field_delete(bv, result)
             if op == "types_declare":
                 return self._verify_declared_types(bv, result)
-            raise OperationFailure("unsupported", f"Unsupported verification path: {op}", requested=result.get("requested"))
+            raise OperationFailure(
+                "unsupported",
+                f"Unsupported verification path: {op}",
+                requested=result.get("requested"),
+            )
         except OperationFailure as exc:
             item = dict(result)
             item["status"] = exc.status
@@ -3058,7 +3009,11 @@ class BinaryNinjaBridge:
             is_parameter=bool(item["is_parameter"]),
         )
         observed_name = str(var.name)
-        item["observed"] = {"address": item["address"], "variable": observed_name, "storage": int(item["storage"])}
+        item["observed"] = {
+            "address": item["address"],
+            "variable": observed_name,
+            "storage": int(item["storage"]),
+        }
         if observed_name != item["new_name"]:
             raise OperationFailure(
                 "verification_failed",
@@ -3086,7 +3041,11 @@ class BinaryNinjaBridge:
             is_parameter=bool(item["is_parameter"]),
         )
         observed_type = str(var.type)
-        item["observed"] = {"address": item["address"], "variable": str(var.name), "type": observed_type}
+        item["observed"] = {
+            "address": item["address"],
+            "variable": str(var.name),
+            "type": observed_type,
+        }
         if observed_type != item["expected_type"]:
             raise OperationFailure(
                 "verification_failed",
@@ -3168,7 +3127,10 @@ class BinaryNinjaBridge:
                 observed={"type_name": item["struct_name"]},
             )
         member = self._find_member(type_obj, name=item["field_name"])
-        item["observed"] = {"type_name": item["struct_name"], "field_present": member is not None}
+        item["observed"] = {
+            "type_name": item["struct_name"],
+            "field_present": member is not None,
+        }
         if member is not None:
             raise OperationFailure(
                 "verification_failed",
@@ -3241,7 +3203,11 @@ class BinaryNinjaBridge:
                 return self._op_struct_field_delete(bv, op)
             if kind == "types_declare":
                 return self._op_types_declare(bv, op)
-            raise OperationFailure("unsupported", f"Unsupported mutation operation: {kind}", requested=self._operation_requested(op))
+            raise OperationFailure(
+                "unsupported",
+                f"Unsupported mutation operation: {kind}",
+                requested=self._operation_requested(op),
+            )
         except OperationFailure:
             raise
         except Exception as exc:
@@ -3280,7 +3246,10 @@ class BinaryNinjaBridge:
             type_diffs = self._diff_type_snapshots(type_before, type_after)
             verified_result = self._verify_operation(bv, result)
             annotated_result = self._annotate_operation_result(verified_result, type_diffs)
-            failed = annotated_result.get("status") in {"unsupported", "verification_failed"}
+            failed = annotated_result.get("status") in {
+                "unsupported",
+                "verification_failed",
+            }
             if preview or failed:
                 bv.revert_undo_actions(state)
             else:
@@ -3315,7 +3284,11 @@ class BinaryNinjaBridge:
         if target["kind"] == "function":
             fn = bv.get_function_at(target["address"])
             if fn is None:
-                raise OperationFailure("unsupported", f"Function not found: {identifier}", requested=requested)
+                raise OperationFailure(
+                    "unsupported",
+                    f"Function not found: {identifier}",
+                    requested=requested,
+                )
             if target["before_name"] != new_name:
                 fn.name = new_name
             return {
@@ -3554,6 +3527,7 @@ class BinaryNinjaBridge:
             "parsed_variable_count": len(parsed["variables"]),
             "requested": self._operation_requested(op),
         }
+
 
 _bridge: BinaryNinjaBridge | None = None
 

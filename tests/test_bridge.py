@@ -3,8 +3,6 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import sys
-import threading
-import time
 import types
 from pathlib import Path
 
@@ -54,15 +52,7 @@ def _load_bridge(monkeypatch):
     monkeypatch.delitem(sys.modules, module_name, raising=False)
     monkeypatch.delitem(sys.modules, package_name, raising=False)
 
-    bridge_path = (
-        Path(__file__).resolve().parents[1]
-        / "src"
-        / "bn"
-        / "assets"
-        / "plugin"
-        / "bn_agent_bridge"
-        / "bridge.py"
-    )
+    bridge_path = Path(__file__).resolve().parents[1] / "src" / "bn" / "assets" / "plugin" / "bn_agent_bridge" / "bridge.py"
     package = types.ModuleType(package_name)
     package.__path__ = [str(bridge_path.parent)]
     monkeypatch.setitem(sys.modules, package_name, package)
@@ -130,7 +120,15 @@ class _FakeReg:
 
 
 class _FakeHLILInstructionNode:
-    def __init__(self, text: str, *, condition=None, parent=None, expr_index: int = 0, instr_index: int = 0):
+    def __init__(
+        self,
+        text: str,
+        *,
+        condition=None,
+        parent=None,
+        expr_index: int = 0,
+        instr_index: int = 0,
+    ):
         self.text = text
         self.condition = condition
         self.parent = parent
@@ -196,7 +194,16 @@ class _FakeVariable:
 
 
 class _FakeBV:
-    def __init__(self, *, functions=None, symbols=None, types_=None, arch=None, disassembly=None, instruction_lengths=None):
+    def __init__(
+        self,
+        *,
+        functions=None,
+        symbols=None,
+        types_=None,
+        arch=None,
+        disassembly=None,
+        instruction_lengths=None,
+    ):
         self.functions = list(functions or [])
         self._symbols = list(symbols or [])
         self.types = dict(types_ or {})
@@ -245,7 +252,14 @@ class _FakeBV:
 
 
 class _FakeType:
-    def __init__(self, decl: str, *, width: int = 0, members=None, type_class: str = "StructureTypeClass"):
+    def __init__(
+        self,
+        decl: str,
+        *,
+        width: int = 0,
+        members=None,
+        type_class: str = "StructureTypeClass",
+    ):
         self._decl = decl
         self.width = width
         self.members = list(members) if members is not None else None
@@ -378,7 +392,11 @@ def test_refresh_updates_analysis_and_returns_target_info(monkeypatch):
     bv = _FakeMutationBV()
 
     monkeypatch.setattr(instance, "_resolve_view", lambda selector: bv)
-    monkeypatch.setattr(instance, "_target_info", lambda selector: {"selector": "SnailMail_unwrapped.exe.bndb"})
+    monkeypatch.setattr(
+        instance,
+        "_target_info",
+        lambda selector: {"selector": "SnailMail_unwrapped.exe.bndb"},
+    )
 
     result = instance._refresh("active")
 
@@ -408,6 +426,7 @@ def test_doctor_advertises_protocol_capabilities(monkeypatch):
     assert result["protocol_version"] == 1
     assert "py_exec" in result["capabilities"]["operations"]
     assert "batch_apply" not in result["capabilities"]["operations"]
+    assert set(result["capabilities"]["operations"]) == set(instance._operation_handlers())
     assert result["capabilities"]["structured_errors"] is True
 
 
@@ -421,6 +440,17 @@ def test_dispatch_rejects_protocol_mismatch(monkeypatch):
     assert response["error"]["code"] == "protocol_mismatch"
     assert response["error"]["requested"] == {"protocol_version": 999}
     assert response["error"]["observed"] == {"protocol_version": 1}
+
+
+def test_dispatch_rejects_unknown_operation(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+
+    response = instance.dispatch({"protocol_version": 1, "op": "missing", "params": {}})
+
+    assert response["ok"] is False
+    assert response["error"]["code"] == "unknown_operation"
+    assert response["error"]["requested"] == {"op": "missing"}
 
 
 def test_target_manager_requires_explicit_target_for_multiple_views(monkeypatch):
@@ -597,7 +627,10 @@ def test_op_set_prototype_uses_string_user_type_for_bn_compat(monkeypatch):
 
     class _PrototypeBV(_FakeBV):
         def parse_type_string(self, declaration):
-            return _FakeType("void* __thiscall(struct GarbageHazardRuntime* self)", type_class="FunctionTypeClass"), None
+            return _FakeType(
+                "void* __thiscall(struct GarbageHazardRuntime* self)",
+                type_class="FunctionTypeClass",
+            ), None
 
     fn = _SetterFunction()
     bv = _PrototypeBV(functions=[fn])
@@ -648,12 +681,8 @@ def test_list_locals_returns_stable_ids(monkeypatch):
     bridge = _load_bridge(monkeypatch)
     instance = bridge.BinaryNinjaBridge()
     fn = _FakeFunction(0x401000, "player_update", "int32_t player_update(int32_t arg1)")
-    fn.parameter_vars = [
-        _FakeVariable(name="arg1", storage=4, var_type="int32_t", identifier=1001, index=0)
-    ]
-    fn.stack_layout = [
-        _FakeVariable(name="var_4", storage=-4, var_type="float", identifier=2001, index=1)
-    ]
+    fn.parameter_vars = [_FakeVariable(name="arg1", storage=4, var_type="int32_t", identifier=1001, index=0)]
+    fn.stack_layout = [_FakeVariable(name="var_4", storage=-4, var_type="float", identifier=2001, index=1)]
     bv = _FakeBV(functions=[fn])
     monkeypatch.setattr(instance, "_resolve_view", lambda selector: bv)
 
@@ -703,9 +732,7 @@ def test_function_info_includes_metadata(monkeypatch):
     bridge = _load_bridge(monkeypatch)
     instance = bridge.BinaryNinjaBridge()
     fn = _FakeFunction(0x401000, "player_update", "int32_t player_update(int32_t arg1)")
-    fn.parameter_vars = [
-        _FakeVariable(name="arg1", storage=4, var_type="int32_t", identifier=1001, index=0)
-    ]
+    fn.parameter_vars = [_FakeVariable(name="arg1", storage=4, var_type="int32_t", identifier=1001, index=0)]
     bv = _FakeBV(functions=[fn])
     monkeypatch.setattr(instance, "_resolve_view", lambda selector: bv)
 
@@ -962,7 +989,11 @@ def test_py_exec_exposes_stable_helpers_and_full_view(monkeypatch):
         "result = {'value': read_u32(0x401000), 'same': current_view is bv, 'name': function(0x401020).name}",
     )
 
-    assert result["result"] == {"value": 0x90909090, "same": True, "name": "player_update"}
+    assert result["result"] == {
+        "value": 0x90909090,
+        "same": True,
+        "name": "player_update",
+    }
 
 
 def test_py_exec_reports_traceback_as_structured_error(monkeypatch):
@@ -1069,7 +1100,10 @@ def test_callsites_returns_local_hlil_assignment_and_pre_branch_condition(monkey
     assert rows[1]["call_index"] == 1
     assert rows[1]["hlil_statement"] == "eax_3, edx_2 = crt_rand()"
     assert rows[1]["pre_branch_condition"] == "result == 2"
-    assert [item["address"] for item in rows[0]["previous_instructions"]] == ["0x41249c", "0x41249e"]
+    assert [item["address"] for item in rows[0]["previous_instructions"]] == [
+        "0x41249c",
+        "0x41249e",
+    ]
     assert rows[0]["call_instruction"]["text"] == "call crt_rand"
     assert [item["address"] for item in rows[0]["next_instructions"][:1]] == ["0x4124a5"]
 
@@ -1212,7 +1246,9 @@ def test_callsites_within_file_scope_preserves_file_order_and_dedupes(monkeypatc
     assert [row["call_index"] for row in rows] == [0, 0]
 
 
-def test_callsites_ignores_indirect_calls_and_returns_null_context_when_unmapped(monkeypatch):
+def test_callsites_ignores_indirect_calls_and_returns_null_context_when_unmapped(
+    monkeypatch,
+):
     bridge = _load_bridge(monkeypatch)
     instance = bridge.BinaryNinjaBridge()
     callee = _FakeFunction(0x461746, "crt_rand")
@@ -1335,9 +1371,7 @@ def test_bridge_handler_swallows_broken_pipe(monkeypatch):
 
     handler._write_response(b"{}", op="xrefs", request_id="req-123")
 
-    assert warnings == [
-        "BN Agent Bridge client disconnected before response could be delivered (op=xrefs, id=req-123)"
-    ]
+    assert warnings == ["BN Agent Bridge client disconnected before response could be delivered (op=xrefs, id=req-123)"]
 
 
 def test_bridge_handler_reraises_unrelated_write_errors(monkeypatch):
@@ -1393,67 +1427,6 @@ def test_diff_snapshots_marks_name_only_changes(monkeypatch):
     assert diffs[0]["after_name"] == "player_update"
     assert diffs[0]["diff"] == "--- before:sub_401000\n+++ after:player_update"
     assert "before_excerpt" not in diffs[0]
-
-
-def test_read_write_lock_blocks_reader_until_writer_releases(monkeypatch):
-    bridge = _load_bridge(monkeypatch)
-    lock = bridge._ReadWriteLock()
-    writer_ready = threading.Event()
-    writer_release = threading.Event()
-    reader_entered = threading.Event()
-
-    def writer():
-        with lock.write():
-            writer_ready.set()
-            writer_release.wait(1)
-
-    def reader():
-        writer_ready.wait(1)
-        with lock.read():
-            reader_entered.set()
-
-    writer_thread = threading.Thread(target=writer)
-    reader_thread = threading.Thread(target=reader)
-    writer_thread.start()
-    reader_thread.start()
-
-    assert writer_ready.wait(1)
-    time.sleep(0.05)
-    assert not reader_entered.is_set()
-
-    writer_release.set()
-    reader_thread.join(1)
-    writer_thread.join(1)
-
-    assert reader_entered.is_set()
-
-
-def test_read_write_lock_allows_parallel_readers(monkeypatch):
-    bridge = _load_bridge(monkeypatch)
-    lock = bridge._ReadWriteLock()
-    entered: list[str] = []
-    both_entered = threading.Event()
-    release = threading.Event()
-
-    def reader(name: str):
-        with lock.read():
-            entered.append(name)
-            if len(entered) == 2:
-                both_entered.set()
-            release.wait(1)
-
-    first = threading.Thread(target=reader, args=("first",))
-    second = threading.Thread(target=reader, args=("second",))
-    first.start()
-    second.start()
-
-    assert both_entered.wait(1)
-
-    release.set()
-    first.join(1)
-    second.join(1)
-
-    assert sorted(entered) == ["first", "second"]
 
 
 def test_collect_open_views_uses_tabs_api(monkeypatch):
