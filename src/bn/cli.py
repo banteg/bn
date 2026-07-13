@@ -2110,6 +2110,26 @@ def _normalize_target_argv(argv: list[str]) -> list[str]:
     return remaining
 
 
+def _parse_args(parser: argparse.ArgumentParser, argv: list[str]) -> argparse.Namespace:
+    args, extra = parser.parse_known_args(argv)
+    if not extra:
+        return args
+
+    # Early Python 3.12 releases do not resume the trailing nargs="*"
+    # positional after an option in `bn xrefs field <Struct.field>`.
+    if (
+        getattr(args, "handler", None) is _xrefs
+        and args.identifier == "field"
+        and not args.extra
+        and len(extra) == 1
+        and not extra[0].startswith("-")
+    ):
+        args.extra = extra
+        return args
+
+    parser.error("unrecognized arguments: " + " ".join(extra))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     raw_argv = list(sys.argv[1:] if argv is None else argv)
@@ -2118,7 +2138,7 @@ def main(argv: list[str] | None = None) -> int:
     except BridgeError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    args = parser.parse_args(normalized_argv)
+    args = _parse_args(parser, normalized_argv)
     handler: Callable[[argparse.Namespace], int] | None = getattr(args, "handler", None)
     if handler is None:
         selected_parser = getattr(args, "_parser", parser)
