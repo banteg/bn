@@ -1029,7 +1029,7 @@ def _doctor(args: argparse.Namespace) -> int:
             "pid": instance.pid,
             "socket_path": str(instance.socket_path),
             "plugin_version": instance.plugin_version,
-            "protocol_version": instance.protocol_version,
+            "protocol_version": getattr(instance, "protocol_version", None),
             "plugin_build_id": loaded_build_id,
             "installed_plugin_build_id": install_build_id,
             "source_plugin_build_id": source_build_id,

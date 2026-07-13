@@ -766,27 +766,27 @@ class BinaryNinjaBridge:
             return self._py_exec(target, str(params["script"]))
 
         if op == "rename_symbol":
-            return self._mutation(target, bool(params.get("preview")), [params])
+            return self._mutation(target, bool(params.get("preview")), {"op": "rename_symbol", **params})
         if op == "get_comment":
             return self._get_comment(target, params.get("address"), params.get("function"))
         if op == "set_comment":
-            return self._mutation(target, bool(params.get("preview")), [{"op": "set_comment", **params}])
+            return self._mutation(target, bool(params.get("preview")), {"op": "set_comment", **params})
         if op == "delete_comment":
-            return self._mutation(target, bool(params.get("preview")), [{"op": "delete_comment", **params}])
+            return self._mutation(target, bool(params.get("preview")), {"op": "delete_comment", **params})
         if op == "set_prototype":
-            return self._mutation(target, bool(params.get("preview")), [{"op": "set_prototype", **params}])
+            return self._mutation(target, bool(params.get("preview")), {"op": "set_prototype", **params})
         if op == "local_rename":
-            return self._mutation(target, bool(params.get("preview")), [{"op": "local_rename", **params}])
+            return self._mutation(target, bool(params.get("preview")), {"op": "local_rename", **params})
         if op == "local_retype":
-            return self._mutation(target, bool(params.get("preview")), [{"op": "local_retype", **params}])
+            return self._mutation(target, bool(params.get("preview")), {"op": "local_retype", **params})
         if op == "struct_field_set":
-            return self._mutation(target, bool(params.get("preview")), [{"op": "struct_field_set", **params}])
+            return self._mutation(target, bool(params.get("preview")), {"op": "struct_field_set", **params})
         if op == "struct_field_rename":
-            return self._mutation(target, bool(params.get("preview")), [{"op": "struct_field_rename", **params}])
+            return self._mutation(target, bool(params.get("preview")), {"op": "struct_field_rename", **params})
         if op == "struct_field_delete":
-            return self._mutation(target, bool(params.get("preview")), [{"op": "struct_field_delete", **params}])
+            return self._mutation(target, bool(params.get("preview")), {"op": "struct_field_delete", **params})
         if op == "types_declare":
-            return self._mutation(target, bool(params.get("preview")), [{"op": "types_declare", **params}])
+            return self._mutation(target, bool(params.get("preview")), {"op": "types_declare", **params})
         raise ValueError(f"Unknown operation: {op}")
 
     def _doctor(self):
@@ -2717,7 +2717,7 @@ class BinaryNinjaBridge:
         }
 
     def _operation_type_names(self, bv, op: dict[str, Any]) -> list[str]:
-        kind = op.get("op") or "rename_symbol"
+        kind = str(op["op"])
         if kind.startswith("struct_") and op.get("struct_name"):
             return [str(op["struct_name"])]
         if kind == "types_declare":
@@ -2728,47 +2728,36 @@ class BinaryNinjaBridge:
             )["types"]]
         return []
 
-    def _guess_affected_functions(self, bv, operations: list[dict[str, Any]]):
+    def _guess_affected_functions(self, bv, operation: dict[str, Any]):
+        kind = str(operation["op"])
+        functions = []
+        try:
+            if kind == "rename_symbol" and operation.get("kind") != "data":
+                functions = [self._find_function(bv, operation["identifier"])]
+            elif kind in {"set_prototype", "local_rename", "local_retype"}:
+                ident = operation.get("identifier") or operation.get("function")
+                functions = [self._find_function(bv, ident)]
+            elif kind in {"set_comment", "delete_comment"}:
+                if operation.get("function"):
+                    functions = [self._find_function(bv, operation["function"])]
+                elif operation.get("address"):
+                    functions = self._functions_containing(bv, _parse_address(operation["address"]))
+            elif kind.startswith("struct_") or kind == "types_declare":
+                for type_name in self._operation_type_names(bv, operation):
+                    functions.extend(self._guess_type_affected_functions(bv, type_name))
+        except Exception:
+            return []
+
         affected = []
         seen = set()
-        for op in operations:
-            kind = op.get("op") or "rename_symbol"
-            functions = []
-            try:
-                if kind == "rename_symbol" and op.get("kind") != "data":
-                    functions = [self._find_function(bv, op["identifier"])]
-                elif kind in {"set_prototype", "local_rename", "local_retype"}:
-                    ident = op.get("identifier") or op.get("function")
-                    functions = [self._find_function(bv, ident)]
-                elif kind in {"set_comment", "delete_comment"}:
-                    if op.get("function"):
-                        functions = [self._find_function(bv, op["function"])]
-                    elif op.get("address"):
-                        functions = self._functions_containing(bv, _parse_address(op["address"]))
-                elif kind.startswith("struct_") or kind == "types_declare":
-                    for type_name in self._operation_type_names(bv, op):
-                        functions.extend(self._guess_type_affected_functions(bv, type_name))
-            except Exception:
-                functions = []
-
-            for fn in functions:
-                if fn is None:
-                    continue
-                marker = int(fn.start)
-                if marker not in seen:
-                    seen.add(marker)
-                    affected.append(fn)
+        for fn in functions:
+            if fn is None:
+                continue
+            marker = int(fn.start)
+            if marker not in seen:
+                seen.add(marker)
+                affected.append(fn)
         return affected
-
-    def _affected_type_names(self, bv, operations: list[dict[str, Any]]) -> list[str]:
-        names: list[str] = []
-        seen: set[str] = set()
-        for op in operations:
-            for type_name in self._operation_type_names(bv, op):
-                if type_name not in seen:
-                    seen.add(type_name)
-                    names.append(type_name)
-        return names
 
     def _render_type_layout(self, type_obj) -> str:
         header = str(type_obj)
@@ -2793,9 +2782,9 @@ class BinaryNinjaBridge:
             lines.append(f"0x{offset:04x}: {member_type} {name}")
         return "\n".join(lines)
 
-    def _capture_type_snapshots(self, bv, operations: list[dict[str, Any]]):
+    def _capture_type_snapshots(self, bv, operation: dict[str, Any]):
         snapshots: dict[str, dict[str, Any]] = {}
-        for type_name in self._affected_type_names(bv, operations):
+        for type_name in self._operation_type_names(bv, operation):
             type_obj = bv.get_type_by_name(type_name)
             if type_obj is None:
                 continue
@@ -2835,28 +2824,25 @@ class BinaryNinjaBridge:
             diffs.append(entry)
         return diffs
 
-    def _annotate_operation_results(self, results: list[dict[str, Any]], type_diffs: list[dict[str, Any]]):
+    def _annotate_operation_result(self, result: dict[str, Any], type_diffs: list[dict[str, Any]]):
         type_changes = {item["type_name"]: item for item in type_diffs}
-        annotated = []
-        for result in results:
-            item = dict(result)
-            type_name = item.get("struct_name")
-            if type_name and type_name in type_changes:
-                change = type_changes[type_name]
-                item["changed"] = bool(change["changed"])
-                if not change["changed"]:
-                    item["message"] = change["message"]
-                    if item.get("status") == "verified":
-                        item["status"] = "noop"
-            defined_types = dict(item.get("defined_types") or {})
-            if defined_types:
-                changed_types = {name: bool(type_changes.get(name, {}).get("changed")) for name in defined_types}
-                item["changed_types"] = changed_types
-                if item.get("status") == "verified" and not any(changed_types.values()):
+        item = dict(result)
+        type_name = item.get("struct_name")
+        if type_name and type_name in type_changes:
+            change = type_changes[type_name]
+            item["changed"] = bool(change["changed"])
+            if not change["changed"]:
+                item["message"] = change["message"]
+                if item.get("status") == "verified":
                     item["status"] = "noop"
-                    item["message"] = "No effective change detected"
-            annotated.append(item)
-        return annotated
+        defined_types = dict(item.get("defined_types") or {})
+        if defined_types:
+            changed_types = {name: bool(type_changes.get(name, {}).get("changed")) for name in defined_types}
+            item["changed_types"] = changed_types
+            if item.get("status") == "verified" and not any(changed_types.values()):
+                item["status"] = "noop"
+                item["message"] = "No effective change detected"
+        return item
 
     def _capture_function_snapshots(self, bv, functions):
         snapshots = {}
@@ -2937,7 +2923,7 @@ class BinaryNinjaBridge:
 
     def _operation_failure_result(self, op: dict[str, Any], exc: OperationFailure) -> dict[str, Any]:
         result = {
-            "op": str(op.get("op") or "rename_symbol"),
+            "op": str(op["op"]),
             "status": exc.status,
             "message": exc.message,
             "requested": exc.requested or self._operation_requested(op),
@@ -2945,18 +2931,6 @@ class BinaryNinjaBridge:
         if exc.observed:
             result["observed"] = exc.observed
         return result
-
-    def _mark_unverified_results(self, results: list[dict[str, Any]], message: str) -> list[dict[str, Any]]:
-        annotated = []
-        for result in results:
-            item = dict(result)
-            item["status"] = "unsupported"
-            item["message"] = message
-            annotated.append(item)
-        return annotated
-
-    def _has_failed_results(self, results: list[dict[str, Any]]) -> bool:
-        return any(item.get("status") in {"unsupported", "verification_failed"} for item in results)
 
     def _find_member(self, type_obj, *, offset: int | None = None, name: str | None = None):
         members = getattr(type_obj, "members", None)
@@ -3275,7 +3249,7 @@ class BinaryNinjaBridge:
         return item
 
     def _apply_operation(self, bv, op: dict[str, Any]):
-        kind = op.get("op") or "rename_symbol"
+        kind = str(op["op"])
         try:
             if kind == "rename_symbol":
                 return self._op_rename_symbol(bv, op)
@@ -3307,19 +3281,14 @@ class BinaryNinjaBridge:
                 requested=self._operation_requested(op),
             ) from exc
 
-    def _mutation(self, selector: str | None, preview: bool, operations: list[dict[str, Any]]):
-        if not operations:
-            raise ValueError("Mutation operation list is empty")
-
+    def _mutation(self, selector: str | None, preview: bool, operation: dict[str, Any]):
         bv = self._resolve_view(selector)
-        affected = self._guess_affected_functions(bv, operations)
+        affected = self._guess_affected_functions(bv, operation)
         before = self._capture_function_snapshots(bv, affected)
-        type_before = self._capture_type_snapshots(bv, operations)
+        type_before = self._capture_type_snapshots(bv, operation)
         state = bv.begin_undo_actions()
-        results = []
         try:
-            for op in operations:
-                results.append(self._apply_operation(bv, op))
+            result = self._apply_operation(bv, operation)
         except OperationFailure as exc:
             with contextlib.suppress(Exception):
                 bv.revert_undo_actions(state)
@@ -3328,8 +3297,7 @@ class BinaryNinjaBridge:
                 "success": False,
                 "committed": False,
                 "message": "Rolled back before post-state verification because an operation failed to apply.",
-                "results": self._mark_unverified_results(results, "Rolled back before post-state verification.")
-                + [self._operation_failure_result(operations[len(results)], exc)],
+                "results": [self._operation_failure_result(operation, exc)],
                 "affected_functions": [],
                 "affected_types": [],
             }
@@ -3337,12 +3305,12 @@ class BinaryNinjaBridge:
         try:
             bv.update_analysis_and_wait()
             after = self._capture_function_snapshots(bv, affected)
-            type_after = self._capture_type_snapshots(bv, operations)
+            type_after = self._capture_type_snapshots(bv, operation)
             diffs = self._diff_snapshots(before, after)
             type_diffs = self._diff_type_snapshots(type_before, type_after)
-            verified_results = [self._verify_operation(bv, result) for result in results]
-            annotated_results = self._annotate_operation_results(verified_results, type_diffs)
-            failed = self._has_failed_results(annotated_results)
+            verified_result = self._verify_operation(bv, result)
+            annotated_result = self._annotate_operation_result(verified_result, type_diffs)
+            failed = annotated_result.get("status") in {"unsupported", "verification_failed"}
             if preview or failed:
                 bv.revert_undo_actions(state)
             else:
@@ -3359,7 +3327,7 @@ class BinaryNinjaBridge:
                 "success": not failed,
                 "committed": bool((not preview) and (not failed)),
                 "message": message,
-                "results": annotated_results,
+                "results": [annotated_result],
                 "affected_functions": diffs,
                 "affected_types": type_diffs,
             }
