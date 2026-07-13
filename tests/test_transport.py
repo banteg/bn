@@ -238,7 +238,7 @@ def test_send_request_retries_transient_connect_failures(tmp_path, monkeypatch):
         def connect(self, path):
             type(self).attempts += 1
             if type(self).attempts == 1:
-                raise ConnectionRefusedError(61, "Connection refused")
+                raise ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused")
 
         def sendall(self, payload):
             self.payload = payload
