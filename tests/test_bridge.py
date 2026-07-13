@@ -49,8 +49,9 @@ def _load_bridge(monkeypatch):
     monkeypatch.delitem(sys.modules, "binaryninjaui", raising=False)
     package_name = "bn_test_bridge"
     module_name = f"{package_name}.bridge"
-    monkeypatch.delitem(sys.modules, module_name, raising=False)
-    monkeypatch.delitem(sys.modules, package_name, raising=False)
+    for loaded_name in list(sys.modules):
+        if loaded_name == package_name or loaded_name.startswith(f"{package_name}."):
+            sys.modules.pop(loaded_name)
 
     bridge_path = Path(__file__).resolve().parents[1] / "src" / "bn" / "assets" / "plugin" / "bn_agent_bridge" / "bridge.py"
     package = types.ModuleType(package_name)
@@ -1431,6 +1432,7 @@ def test_diff_snapshots_marks_name_only_changes(monkeypatch):
 
 def test_collect_open_views_uses_tabs_api(monkeypatch):
     bridge = _load_bridge(monkeypatch)
+    targets = importlib.import_module(f"{bridge.__package__}.targets")
 
     class _View:
         def __init__(self, data):
@@ -1482,9 +1484,9 @@ def test_collect_open_views_uses_tabs_api(monkeypatch):
             activeContext=lambda: None,
         )
     )
-    monkeypatch.setattr(bridge, "ui", fake_ui)
+    monkeypatch.setattr(targets, "ui", fake_ui)
 
-    views = bridge._collect_open_views()
+    views = targets._collect_open_views()
 
     assert len(views) == 3
     assert set(id(view) for view in views) == {id(view_a), id(view_b), id(view_c)}
