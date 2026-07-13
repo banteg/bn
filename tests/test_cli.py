@@ -7,16 +7,11 @@ import bn.cli
 import pytest
 
 
-def test_function_list_uses_implicit_target_when_single_target_is_open(monkeypatch, capsys):
+def test_function_list_sends_omitted_target_to_bridge(monkeypatch, capsys):
     calls = []
 
     def fake_send_request(op, *, params=None, target=None, timeout=30.0):
         calls.append({"op": op, "params": params, "target": target})
-        if op == "list_targets":
-            return {
-                "ok": True,
-                "result": [{"target_id": "123:1:7", "selector": "SnailMail_unwrapped.exe.bndb"}],
-            }
         if op == "list_functions":
             return {"ok": True, "result": [{"name": "sub_401000", "address": "0x401000"}]}
         raise AssertionError(f"unexpected op: {op}")
@@ -25,9 +20,9 @@ def test_function_list_uses_implicit_target_when_single_target_is_open(monkeypat
 
     rc = bn.cli.main(["function", "list"])
     assert rc == 0
-    assert [call["op"] for call in calls] == ["list_targets", "list_functions"]
-    assert calls[1]["params"] == {}
-    assert calls[1]["target"] == "active"
+    assert [call["op"] for call in calls] == ["list_functions"]
+    assert calls[0]["params"] == {}
+    assert calls[0]["target"] is None
     output = capsys.readouterr().out
     assert output == "0x401000  sub_401000\n"
     assert '"name"' not in output
@@ -67,21 +62,15 @@ def test_bn_target_environment_default(monkeypatch, capsys):
     assert capsys.readouterr().out == "none\n"
 
 
-def test_function_list_requires_target_when_multiple_targets_are_open(monkeypatch, capsys):
+def test_function_list_renders_bridge_target_error(monkeypatch, capsys):
     def fake_send_request(op, *, params=None, target=None, timeout=30.0):
-        if op == "list_targets":
-            return {
-                "ok": True,
-                "result": [
-                    {
-                        "target_id": "123:1:7",
-                        "selector": "SnailMail_unwrapped.exe.bndb",
-                        "active": True,
-                    },
-                    {"target_id": "123:2:8", "selector": "other.exe.bndb", "active": False},
-                ],
-            }
-        raise AssertionError(f"unexpected op: {op}")
+        assert op == "list_functions"
+        raise bn.cli.BridgeError(
+            "This command requires --target when multiple targets are open.\n"
+            "Open targets:\n"
+            "- SnailMail_unwrapped.exe.bndb [active] (target_id: 123:1:7)\n"
+            "- other.exe.bndb (target_id: 123:2:8)"
+        )
 
     monkeypatch.setattr(bn.cli, "send_request", fake_send_request)
 
@@ -375,21 +364,11 @@ def test_symbol_rename_builds_preview_payload(monkeypatch):
     assert captured["params"]["preview"] is True
 
 
-def test_symbol_rename_uses_implicit_target_when_single_target_is_open(monkeypatch):
+def test_symbol_rename_sends_omitted_target_to_bridge(monkeypatch):
     calls = []
 
     def fake_send_request(op, *, params=None, target=None, timeout=30.0):
         calls.append({"op": op, "params": params, "target": target})
-        if op == "list_targets":
-            return {
-                "ok": True,
-                "result": [
-                    {
-                        "target_id": "123:1:7",
-                        "selector": "SnailMail_unwrapped.exe.bndb",
-                    }
-                ],
-            }
         if op == "rename_symbol":
             return {"ok": True, "result": {"preview": True}}
         raise AssertionError(f"unexpected op: {op}")
@@ -399,25 +378,19 @@ def test_symbol_rename_uses_implicit_target_when_single_target_is_open(monkeypat
     rc = bn.cli.main(["symbol", "rename", "--preview", "sub_401000", "player_update"])
 
     assert rc == 0
-    assert [call["op"] for call in calls] == ["list_targets", "rename_symbol"]
-    assert calls[1]["target"] == "active"
+    assert [call["op"] for call in calls] == ["rename_symbol"]
+    assert calls[0]["target"] is None
 
 
-def test_symbol_rename_requires_target_when_multiple_targets_are_open(monkeypatch, capsys):
+def test_symbol_rename_renders_bridge_target_error(monkeypatch, capsys):
     def fake_send_request(op, *, params=None, target=None, timeout=30.0):
-        if op == "list_targets":
-            return {
-                "ok": True,
-                "result": [
-                    {
-                        "target_id": "123:1:7",
-                        "selector": "SnailMail_unwrapped.exe.bndb",
-                        "active": True,
-                    },
-                    {"target_id": "123:2:8", "selector": "other.exe.bndb", "active": False},
-                ],
-            }
-        raise AssertionError(f"unexpected op: {op}")
+        assert op == "rename_symbol"
+        raise bn.cli.BridgeError(
+            "This command requires --target when multiple targets are open.\n"
+            "Open targets:\n"
+            "- SnailMail_unwrapped.exe.bndb [active] (target_id: 123:1:7)\n"
+            "- other.exe.bndb (target_id: 123:2:8)"
+        )
 
     monkeypatch.setattr(bn.cli, "send_request", fake_send_request)
 
@@ -493,16 +466,11 @@ def test_target_list_text_format_renders_summary(monkeypatch, capsys):
     assert '"selector"' not in output
 
 
-def test_refresh_uses_implicit_target_when_single_target_is_open(monkeypatch, capsys):
+def test_refresh_sends_omitted_target_to_bridge(monkeypatch, capsys):
     calls = []
 
     def fake_send_request(op, *, params=None, target=None, timeout=30.0):
         calls.append({"op": op, "params": params, "target": target})
-        if op == "list_targets":
-            return {
-                "ok": True,
-                "result": [{"target_id": "123:1:7", "selector": "SnailMail_unwrapped.exe.bndb"}],
-            }
         if op == "refresh":
             return {
                 "ok": True,
@@ -525,8 +493,8 @@ def test_refresh_uses_implicit_target_when_single_target_is_open(monkeypatch, ca
     rc = bn.cli.main(["refresh", "--format", "text"])
 
     assert rc == 0
-    assert [call["op"] for call in calls] == ["list_targets", "refresh"]
-    assert calls[1]["target"] == "active"
+    assert [call["op"] for call in calls] == ["refresh"]
+    assert calls[0]["target"] is None
     output = capsys.readouterr().out
     assert "refreshed: true" in output
     assert "SnailMail_unwrapped.exe.bndb" in output
@@ -562,16 +530,11 @@ def test_types_show_uses_type_info_and_text_renderer(monkeypatch, capsys):
     assert '"decl"' not in output
 
 
-def test_types_declare_uses_implicit_target_when_single_target_is_open(monkeypatch):
+def test_types_declare_sends_omitted_target_to_bridge(monkeypatch):
     calls = []
 
     def fake_send_request(op, *, params=None, target=None, timeout=30.0):
         calls.append({"op": op, "params": params, "target": target})
-        if op == "list_targets":
-            return {
-                "ok": True,
-                "result": [{"target_id": "123:1:7", "selector": "SnailMail_unwrapped.exe.bndb"}],
-            }
         if op == "types_declare":
             return {"ok": True, "result": {"preview": True}}
         raise AssertionError(f"unexpected op: {op}")
@@ -581,9 +544,9 @@ def test_types_declare_uses_implicit_target_when_single_target_is_open(monkeypat
     rc = bn.cli.main(["types", "declare", "typedef struct Player { int hp; } Player;"])
 
     assert rc == 0
-    assert [call["op"] for call in calls] == ["list_targets", "types_declare"]
-    assert calls[1]["target"] == "active"
-    assert "typedef struct Player" in calls[1]["params"]["declaration"]
+    assert [call["op"] for call in calls] == ["types_declare"]
+    assert calls[0]["target"] is None
+    assert "typedef struct Player" in calls[0]["params"]["declaration"]
 
 
 def test_types_declare_passes_source_path_for_file_input(monkeypatch, tmp_path):
@@ -799,16 +762,11 @@ def test_callsites_text_omits_null_hlil_and_pre_branch(monkeypatch, capsys):
     assert "pre-branch:" not in output
 
 
-def test_comment_get_uses_implicit_target_when_single_target_is_open(monkeypatch, capsys):
+def test_comment_get_sends_omitted_target_to_bridge(monkeypatch, capsys):
     calls = []
 
     def fake_send_request(op, *, params=None, target=None, timeout=30.0):
         calls.append({"op": op, "params": params, "target": target})
-        if op == "list_targets":
-            return {
-                "ok": True,
-                "result": [{"target_id": "123:1:7", "selector": "SnailMail_unwrapped.exe.bndb"}],
-            }
         if op == "get_comment":
             return {"ok": True, "result": {"address": "0x401000", "comment": "interesting branch", "has_comment": True}}
         raise AssertionError(f"unexpected op: {op}")
@@ -818,8 +776,8 @@ def test_comment_get_uses_implicit_target_when_single_target_is_open(monkeypatch
     rc = bn.cli.main(["comment", "get", "--format", "text", "--address", "0x401000"])
 
     assert rc == 0
-    assert [call["op"] for call in calls] == ["list_targets", "get_comment"]
-    assert calls[1]["target"] == "active"
+    assert [call["op"] for call in calls] == ["get_comment"]
+    assert calls[0]["target"] is None
     assert capsys.readouterr().out == "interesting branch\n"
 
 

@@ -418,6 +418,52 @@ def test_doctor_advertises_protocol_capabilities(monkeypatch):
     assert result["capabilities"]["structured_errors"] is True
 
 
+def test_dispatch_rejects_protocol_mismatch(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+
+    response = instance.dispatch({"protocol_version": 999, "op": "doctor", "params": {}})
+
+    assert response["ok"] is False
+    assert response["error"]["code"] == "protocol_mismatch"
+    assert response["error"]["requested"] == {"protocol_version": 999}
+    assert response["error"]["observed"] == {"protocol_version": 1}
+
+
+def test_target_manager_requires_explicit_target_for_multiple_views(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    manager = bridge.TargetManager()
+    targets = [
+        {"target_id": "123:1:7", "selector": "one.bndb", "active": True},
+        {"target_id": "123:2:8", "selector": "two.bndb", "active": False},
+    ]
+    monkeypatch.setattr(manager, "refresh", lambda: targets)
+
+    with pytest.raises(bridge.OperationFailure) as exc_info:
+        manager.resolve(None)
+
+    assert exc_info.value.status == "target_required"
+    assert exc_info.value.observed == {"targets": targets}
+    assert "one.bndb [active]" in exc_info.value.message
+
+
+def test_target_manager_only_follows_active_view_when_explicit(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    manager = bridge.TargetManager()
+    active_view = object()
+    monkeypatch.setattr(
+        manager,
+        "refresh",
+        lambda: [
+            {"target_id": "123:1:7", "selector": "one.bndb", "active": True},
+            {"target_id": "123:2:8", "selector": "two.bndb", "active": False},
+        ],
+    )
+    monkeypatch.setattr(manager, "_default_view", lambda: active_view)
+
+    assert manager.resolve("active") is active_view
+
+
 def test_parse_declaration_source_uses_platform_parser_with_source_path(monkeypatch, tmp_path):
     bridge = _load_bridge(monkeypatch)
     instance = bridge.BinaryNinjaBridge()

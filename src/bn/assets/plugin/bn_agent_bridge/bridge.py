@@ -360,6 +360,19 @@ class TargetRecord:
         return f"{os.getpid()}:{self.view_id}:{self.session_id}"
 
 
+def _render_target_choices(targets: list[dict[str, Any]]) -> str:
+    lines = []
+    for target in targets:
+        label = str(target.get("selector") or target.get("basename") or target.get("target_id") or "<unknown>")
+        if target.get("active"):
+            label += " [active]"
+        target_id = target.get("target_id")
+        if target_id:
+            label += f" (target_id: {target_id})"
+        lines.append(f"- {label}")
+    return "\n".join(lines)
+
+
 class TargetManager:
     def __init__(self):
         self._lock = threading.RLock()
@@ -471,12 +484,28 @@ class TargetManager:
     def resolve(self, selector: str | None):
         targets = self.refresh()
         if not targets:
-            raise RuntimeError("No BinaryView targets are open in the GUI")
+            raise OperationFailure("no_targets", "No BinaryView targets are open in the GUI")
 
-        if selector in (None, "", "active"):
+        if selector in (None, ""):
+            if len(targets) != 1:
+                raise OperationFailure(
+                    "target_required",
+                    "This command requires --target when multiple targets are open.\n"
+                    f"Open targets:\n{_render_target_choices(targets)}",
+                    observed={"targets": targets},
+                )
+            selector = str(targets[0]["target_id"])
+
+        if selector == "active":
             active = self._default_view()
             if active is None:
-                raise RuntimeError("No active BinaryView is selected and multiple targets are open")
+                raise OperationFailure(
+                    "target_required",
+                    "No active BinaryView is selected; pass an explicit --target.\n"
+                    f"Open targets:\n{_render_target_choices(targets)}",
+                    requested={"target": "active"},
+                    observed={"targets": targets},
+                )
             return active
 
         with self._lock:
@@ -485,7 +514,12 @@ class TargetManager:
                     view = record.ref()
                     if view is not None:
                         return view
-        raise RuntimeError(f"Unknown target selector: {selector}")
+        raise OperationFailure(
+            "unknown_target",
+            f"Unknown target selector: {selector}\nOpen targets:\n{_render_target_choices(targets)}",
+            requested={"target": selector},
+            observed={"targets": targets},
+        )
 
 
 class BridgeHandler(socketserver.StreamRequestHandler):
@@ -576,6 +610,7 @@ class BinaryNinjaBridge:
             "socket_path": str(self.socket_path),
             "plugin_name": PLUGIN_NAME,
             "plugin_version": VERSION,
+            "protocol_version": PROTOCOL_VERSION,
             "plugin_build_id": PLUGIN_BUILD_ID,
             "started_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -586,6 +621,14 @@ class BinaryNinjaBridge:
         params = payload.get("params") or {}
         target = payload.get("target")
         try:
+            request_protocol = payload.get("protocol_version")
+            if request_protocol != PROTOCOL_VERSION:
+                raise OperationFailure(
+                    "protocol_mismatch",
+                    f"Protocol mismatch: CLI sent {request_protocol!r}, bridge requires {PROTOCOL_VERSION}",
+                    requested={"protocol_version": request_protocol},
+                    observed={"protocol_version": PROTOCOL_VERSION},
+                )
             lock = contextlib.nullcontext()
             if op in WRITE_LOCKED_OPS:
                 lock = self._target_lock.write()

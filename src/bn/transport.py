@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .paths import bridge_registry_path
+from .version import PROTOCOL_VERSION
 
 
 class BridgeError(RuntimeError):
@@ -46,6 +47,7 @@ class BridgeInstance:
     plugin_version: str
     started_at: str | None
     meta: dict[str, Any]
+    protocol_version: int | None = None
 
 
 def _purge_stale_registry(registry_path: Path) -> None:
@@ -82,6 +84,12 @@ def _load_instance(path: Path) -> BridgeInstance | None:
         _purge_stale_registry(path)
         return None
 
+    protocol_value = payload.get("protocol_version")
+    try:
+        protocol_version = int(protocol_value) if protocol_value is not None else None
+    except (TypeError, ValueError):
+        protocol_version = None
+
     return BridgeInstance(
         pid=pid,
         socket_path=socket_path,
@@ -90,6 +98,7 @@ def _load_instance(path: Path) -> BridgeInstance | None:
         plugin_version=str(payload.get("plugin_version", "0")),
         started_at=payload.get("started_at"),
         meta=payload,
+        protocol_version=protocol_version,
     )
 
 
@@ -123,6 +132,7 @@ def _send_request_to_instance(
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "id": str(uuid.uuid4()),
+        "protocol_version": PROTOCOL_VERSION,
         "op": op,
         "params": params or {},
     }

@@ -227,51 +227,7 @@ def _render_result(
     sys.stdout.write(result.rendered)
 
 
-def _render_target_choice(value: Any) -> str:
-    if not isinstance(value, dict):
-        return _render_fallback_text(value)
-
-    label = str(value.get("selector") or value.get("target_id") or "<unknown>")
-    if value.get("active"):
-        label += " [active]"
-
-    target_id = value.get("target_id")
-    if target_id not in (None, "", value.get("selector")):
-        label += f" (target_id: {target_id})"
-    return label
-
-
-def _render_target_choices(value: Any) -> str:
-    if not isinstance(value, list):
-        return _render_fallback_text(value)
-    if not value:
-        return "none"
-    return "\n".join(f"- {_render_target_choice(item)}" for item in value)
-
-
-def _implicit_target(args: argparse.Namespace) -> str:
-    response = send_request(
-        "list_targets",
-        params={},
-        target=None,
-    )
-    targets = list(response["result"])
-    if len(targets) == 1:
-        return "active"
-    if not targets:
-        raise BridgeError("No BinaryView targets are open in the GUI")
-    raise BridgeError(
-        "This command requires --target when multiple targets are open.\n"
-        f"Open targets:\n{_render_target_choices(targets)}"
-    )
-
-
-def _resolve_target(
-    args: argparse.Namespace,
-    *,
-    require_target: bool,
-    allow_implicit_target: bool = False,
-) -> str | None:
+def _resolve_target(args: argparse.Namespace) -> str | None:
     local_target = getattr(args, "target", None)
     global_target = getattr(args, "global_target", None)
     env_target = os.environ.get("BN_TARGET")
@@ -280,12 +236,7 @@ def _resolve_target(
             f"Conflicting target selectors: --target {global_target!r} before the command and "
             f"--target {local_target!r} after it"
         )
-    target = local_target or global_target or env_target
-    if require_target and not target:
-        if allow_implicit_target:
-            return _implicit_target(args)
-        raise BridgeError("This command requires --target")
-    return target
+    return local_target or global_target or env_target
 
 
 def _filter_text_result(value: str, pattern: str, *, before: int, after: int) -> str:
@@ -345,8 +296,6 @@ def _call(
     op: str,
     params: dict[str, Any] | None = None,
     *,
-    require_target: bool,
-    allow_implicit_target: bool = False,
     text_renderer: Callable[[Any], str] | None = None,
     page_limit: int | None = None,
     page_offset: int = 0,
@@ -361,11 +310,7 @@ def _call(
         effective_page_limit = page_limit
         request_params["limit"] = page_limit + 1
 
-    target = _resolve_target(
-        args,
-        require_target=require_target,
-        allow_implicit_target=allow_implicit_target,
-    )
+    target = _resolve_target(args)
     response = send_request(
         op,
         params=request_params,
@@ -1084,6 +1029,7 @@ def _doctor(args: argparse.Namespace) -> int:
             "pid": instance.pid,
             "socket_path": str(instance.socket_path),
             "plugin_version": instance.plugin_version,
+            "protocol_version": instance.protocol_version,
             "plugin_build_id": loaded_build_id,
             "installed_plugin_build_id": install_build_id,
             "source_plugin_build_id": source_build_id,
@@ -1179,7 +1125,6 @@ def _target_list(args: argparse.Namespace) -> int:
         args,
         "list_targets",
         {},
-        require_target=False,
         text_renderer=_render_target_list_text,
         stem="targets",
     )
@@ -1190,8 +1135,6 @@ def _target_info(args: argparse.Namespace) -> int:
         args,
         "target_info",
         {"selector": args.target},
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_target_info_text,
         stem="target-info",
     )
@@ -1202,8 +1145,6 @@ def _refresh(args: argparse.Namespace) -> int:
         args,
         "refresh",
         {},
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_refresh_text,
         stem="refresh",
     )
@@ -1219,8 +1160,6 @@ def _function_list(args: argparse.Namespace) -> int:
         args,
         "list_functions",
         params,
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_name_address_list_text,
         page_label="function list",
         stem="functions",
@@ -1240,8 +1179,6 @@ def _function_search(args: argparse.Namespace) -> int:
         args,
         "search_functions",
         params,
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_name_address_list_text,
         page_label="function search",
         stem="function-search",
@@ -1253,8 +1190,6 @@ def _function_info(args: argparse.Namespace) -> int:
         args,
         "function_info",
         {"identifier": args.identifier},
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_function_info_text,
         stem="function-info",
     )
@@ -1265,8 +1200,6 @@ def _function_containing(args: argparse.Namespace) -> int:
         args,
         "function_containing",
         {"address": args.address},
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_function_identity_text,
         stem="function-containing",
     )
@@ -1277,8 +1210,6 @@ def _decompile(args: argparse.Namespace) -> int:
         args,
         "decompile",
         {"identifier": args.identifier},
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_text_field("text"),
         stem="decompile",
     )
@@ -1289,8 +1220,6 @@ def _il(args: argparse.Namespace) -> int:
         args,
         "il",
         {"identifier": args.identifier, "view": args.view, "ssa": bool(args.ssa)},
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_text_field("text"),
         stem="il",
     )
@@ -1305,8 +1234,6 @@ def _disasm(args: argparse.Namespace) -> int:
             "before": args.before_instructions,
             "after": args.after_instructions,
         },
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_text_field("text"),
         stem="disasm",
     )
@@ -1317,8 +1244,6 @@ def _address_info(args: argparse.Namespace) -> int:
         args,
         "address_info",
         {"address": args.address},
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_address_info_text,
         stem="address-info",
     )
@@ -1329,8 +1254,6 @@ def _data_read(args: argparse.Namespace) -> int:
         args,
         "data_read",
         {"address": args.address, "type": args.type, "count": args.count},
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_data_read_text,
         stem="data-read",
     )
@@ -1341,8 +1264,6 @@ def _refs(args: argparse.Namespace) -> int:
         args,
         "refs_from",
         {"identifier": args.identifier},
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_refs_text,
         stem="refs-from",
     )
@@ -1359,8 +1280,6 @@ def _search_text(args: argparse.Namespace) -> int:
             "max_results": args.max_results,
             "max_seconds": args.timeout,
         },
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_search_text,
         stem="search-text",
     )
@@ -1371,8 +1290,6 @@ def _search_constant(args: argparse.Namespace) -> int:
         args,
         "search_constant",
         {"value": args.value, "max_results": args.max_results, "max_seconds": args.timeout},
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_search_text,
         stem="search-constant",
     )
@@ -1386,8 +1303,6 @@ def _xrefs(args: argparse.Namespace) -> int:
             args,
             "field_xrefs",
             {"field": args.extra[0]},
-            require_target=True,
-            allow_implicit_target=True,
             text_renderer=_render_field_xrefs_text,
             stem="field-xrefs",
         )
@@ -1397,8 +1312,6 @@ def _xrefs(args: argparse.Namespace) -> int:
         args,
         "xrefs",
         {"identifier": args.identifier},
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_xrefs_text,
         stem="xrefs",
     )
@@ -1435,8 +1348,6 @@ def _callsites(args: argparse.Namespace) -> int:
             "context": args.context,
             "caller_static": bool(args.caller_static),
         },
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=lambda value: _render_callsites_text(
             value,
             prefer_caller_static=bool(args.caller_static),
@@ -1450,8 +1361,6 @@ def _types(args: argparse.Namespace) -> int:
         args,
         "types",
         {"query": args.query, "offset": args.offset, "limit": args.limit},
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_type_list_text,
         page_limit=args.limit,
         page_offset=args.offset,
@@ -1468,8 +1377,6 @@ def _types_show(args: argparse.Namespace) -> int:
             "type_name": args.type_name,
             "require_struct": bool(getattr(args, "require_struct", False)),
         },
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_type_info_text,
         stem="type-show",
     )
@@ -1497,8 +1404,6 @@ def _types_declare(args: argparse.Namespace) -> int:
             "source_path": source_path,
             "preview": bool(args.preview),
         },
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_mutation_text,
         stem="types-declare",
         result_exit_code=_mutation_exit_code,
@@ -1510,8 +1415,6 @@ def _strings(args: argparse.Namespace) -> int:
         args,
         "strings",
         {"query": args.query, "offset": args.offset, "limit": args.limit},
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_strings_text,
         page_limit=args.limit,
         page_offset=args.offset,
@@ -1525,8 +1428,6 @@ def _imports(args: argparse.Namespace) -> int:
         args,
         "imports",
         {},
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_name_address_list_text,
         stem="imports",
     )
@@ -1537,8 +1438,6 @@ def _bundle_function(args: argparse.Namespace) -> int:
         args,
         "bundle_function",
         {"identifier": args.identifier, "out_path": str(args.out) if args.out else None},
-        require_target=True,
-        allow_implicit_target=True,
         stem="function-bundle",
         bridge_writes_output=bool(args.out),
     )
@@ -1558,8 +1457,6 @@ def _py_exec(args: argparse.Namespace) -> int:
         args,
         "py_exec",
         {"script": script},
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_py_exec_text,
         stem="py-exec",
     )
@@ -1575,8 +1472,6 @@ def _symbol_rename(args: argparse.Namespace) -> int:
             "new_name": args.new_name,
             "preview": bool(args.preview),
         },
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_mutation_text,
         stem="symbol-rename",
         result_exit_code=_mutation_exit_code,
@@ -1593,8 +1488,6 @@ def _comment_set(args: argparse.Namespace) -> int:
             "comment": args.comment,
             "preview": bool(args.preview),
         },
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_mutation_text,
         stem="comment-set",
         result_exit_code=_mutation_exit_code,
@@ -1609,8 +1502,6 @@ def _comment_get(args: argparse.Namespace) -> int:
             "address": args.address,
             "function": args.function,
         },
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_comment_text,
         stem="comment-get",
     )
@@ -1625,8 +1516,6 @@ def _comment_delete(args: argparse.Namespace) -> int:
             "function": args.function,
             "preview": bool(args.preview),
         },
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_mutation_text,
         stem="comment-delete",
         result_exit_code=_mutation_exit_code,
@@ -1642,8 +1531,6 @@ def _proto_set(args: argparse.Namespace) -> int:
             "prototype": args.prototype,
             "preview": bool(args.preview),
         },
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_mutation_text,
         stem="prototype-set",
         result_exit_code=_mutation_exit_code,
@@ -1655,8 +1542,6 @@ def _proto_get(args: argparse.Namespace) -> int:
         args,
         "get_prototype",
         {"identifier": args.identifier},
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_proto_text,
         stem="prototype-get",
     )
@@ -1667,8 +1552,6 @@ def _local_list(args: argparse.Namespace) -> int:
         args,
         "list_locals",
         {"identifier": args.function},
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_local_list_text,
         stem="local-list",
     )
@@ -1684,8 +1567,6 @@ def _local_rename(args: argparse.Namespace) -> int:
             "new_name": args.new_name,
             "preview": bool(args.preview),
         },
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_mutation_text,
         stem="local-rename",
         result_exit_code=_mutation_exit_code,
@@ -1702,8 +1583,6 @@ def _local_retype(args: argparse.Namespace) -> int:
             "new_type": args.new_type,
             "preview": bool(args.preview),
         },
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_mutation_text,
         stem="local-retype",
         result_exit_code=_mutation_exit_code,
@@ -1722,8 +1601,6 @@ def _struct_field_set(args: argparse.Namespace) -> int:
             "overwrite_existing": not args.no_overwrite,
             "preview": bool(args.preview),
         },
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_mutation_text,
         stem="struct-field-set",
         result_exit_code=_mutation_exit_code,
@@ -1738,8 +1615,6 @@ def _struct_show(args: argparse.Namespace) -> int:
             "type_name": args.struct_name,
             "require_struct": True,
         },
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_type_info_text,
         stem="struct-show",
     )
@@ -1755,8 +1630,6 @@ def _struct_field_rename(args: argparse.Namespace) -> int:
             "new_name": args.new_name,
             "preview": bool(args.preview),
         },
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_mutation_text,
         stem="struct-field-rename",
         result_exit_code=_mutation_exit_code,
@@ -1772,8 +1645,6 @@ def _struct_field_delete(args: argparse.Namespace) -> int:
             "field_name": args.field_name,
             "preview": bool(args.preview),
         },
-        require_target=True,
-        allow_implicit_target=True,
         text_renderer=_render_mutation_text,
         stem="struct-field-delete",
         result_exit_code=_mutation_exit_code,
