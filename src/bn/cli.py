@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -11,7 +12,7 @@ from typing import Any, Callable
 from .output import write_output_result
 from .paths import plugin_install_dir, plugin_source_dir, skill_install_dir, skill_source_dir
 from .transport import BridgeError, _send_request_to_instance, list_instances, send_request
-from .version import VERSION, build_id_for_file
+from .version import PROTOCOL_VERSION, VERSION, build_id_for_file
 
 FAILED_MUTATION_STATUSES = {"unsupported", "verification_failed"}
 
@@ -122,6 +123,7 @@ def _common_io_options(
     parser: argparse.ArgumentParser,
     *,
     default_format: str = "text",
+    match_context: bool = True,
 ) -> None:
     parser.add_argument(
         "--format",
@@ -130,6 +132,30 @@ def _common_io_options(
         help="Output format",
     )
     parser.add_argument("--out", type=Path, help="Write output to a file instead of stdout")
+    parser.add_argument(
+        "--match",
+        help="Keep matching text lines (regular expression); use --before/--after for context",
+    )
+    if match_context:
+        parser.add_argument(
+            "--before",
+            dest="match_before",
+            type=int,
+            default=0,
+            help="Context lines before each --match",
+        )
+        parser.add_argument(
+            "--after",
+            dest="match_after",
+            type=int,
+            default=0,
+            help="Context lines after each --match",
+        )
+    parser.add_argument(
+        "--no-spill",
+        action="store_true",
+        help="Stream the complete result to stdout even above the automatic spill limit",
+    )
 
 
 def _target_option(
@@ -155,8 +181,16 @@ def _render_result(
     stem: str,
     spill_label: str | None = None,
     spill_context: Any = None,
+    allow_spill: bool = True,
 ) -> None:
-    result = write_output_result(value, fmt=fmt, out_path=out_path, stem=stem)
+    output_args: dict[str, Any] = {
+        "fmt": fmt,
+        "out_path": out_path,
+        "stem": stem,
+    }
+    if not allow_spill:
+        output_args["allow_spill"] = False
+    result = write_output_result(value, **output_args)
     if result.spilled and result.artifact:
         label = spill_label or stem.replace("_", " ")
         artifact = result.artifact
@@ -238,12 +272,61 @@ def _resolve_target(
     require_target: bool,
     allow_implicit_target: bool = False,
 ) -> str | None:
-    target = getattr(args, "target", None)
+    local_target = getattr(args, "target", None)
+    global_target = getattr(args, "global_target", None)
+    env_target = os.environ.get("BN_TARGET")
+    if local_target and global_target and local_target != global_target:
+        raise BridgeError(
+            f"Conflicting target selectors: --target {global_target!r} before the command and "
+            f"--target {local_target!r} after it"
+        )
+    target = local_target or global_target or env_target
     if require_target and not target:
         if allow_implicit_target:
             return _implicit_target(args)
         raise BridgeError("This command requires --target")
     return target
+
+
+def _filter_text_result(value: str, pattern: str, *, before: int, after: int) -> str:
+    if before < 0 or after < 0:
+        raise BridgeError("--before and --after must be non-negative")
+    try:
+        regex = re.compile(pattern, re.IGNORECASE)
+    except re.error as exc:
+        raise BridgeError(f"Invalid --match regular expression: {exc}") from exc
+
+    lines = value.splitlines()
+    selected: set[int] = set()
+    for index, line in enumerate(lines):
+        if not regex.search(line):
+            continue
+        selected.update(range(max(0, index - before), min(len(lines), index + after + 1)))
+    return "\n".join(lines[index] for index in sorted(selected))
+
+
+def _render_direct_result(args: argparse.Namespace, value: Any, *, stem: str) -> None:
+    match = getattr(args, "match", None)
+    if match:
+        if args.format != "text":
+            raise BridgeError("--match is only valid with --format text")
+        if not isinstance(value, str):
+            value = _render_fallback_text(value)
+        value = _filter_text_result(
+            value,
+            match,
+            before=int(getattr(args, "match_before", 0)),
+            after=int(getattr(args, "match_after", 0)),
+        )
+    elif getattr(args, "match_before", 0) or getattr(args, "match_after", 0):
+        raise BridgeError("--before and --after require --match")
+    _render_result(
+        value,
+        fmt=args.format,
+        out_path=args.out,
+        stem=stem,
+        allow_spill=not bool(getattr(args, "no_spill", False)),
+    )
 
 
 def _mutation_exit_code(result: Any) -> int:
@@ -301,6 +384,20 @@ def _call(
     spill_context = result
     if text_renderer is not None and args.format == "text":
         result = text_renderer(result)
+    match = getattr(args, "match", None)
+    if match:
+        if args.format != "text":
+            raise BridgeError("--match is only valid with --format text")
+        if not isinstance(result, str):
+            result = _render_fallback_text(result)
+        result = _filter_text_result(
+            result,
+            match,
+            before=int(getattr(args, "match_before", 0)),
+            after=int(getattr(args, "match_after", 0)),
+        )
+    elif getattr(args, "match_before", 0) or getattr(args, "match_after", 0):
+        raise BridgeError("--before and --after require --match")
     _render_result(
         result,
         fmt=args.format,
@@ -308,6 +405,7 @@ def _call(
         stem=stem,
         spill_label=page_label or op.replace("_", " "),
         spill_context=spill_context,
+        allow_spill=not bool(getattr(args, "no_spill", False)),
     )
     return exit_code
 
@@ -864,6 +962,100 @@ def _render_py_exec_text(value: Any) -> str:
     return "\n\n".join(parts)
 
 
+def _render_function_identity_text(value: Any) -> str:
+    if not isinstance(value, dict):
+        return _render_fallback_text(value)
+    function = value.get("function") if isinstance(value.get("function"), dict) else value
+    name = function.get("name", "<unknown>")
+    address = function.get("address", "<unknown>")
+    return f"{address}  {name}"
+
+
+def _render_address_info_text(value: Any) -> str:
+    if not isinstance(value, dict):
+        return _render_fallback_text(value)
+    lines = [f"address: {value.get('address', '<unknown>')}"]
+    symbol = value.get("symbol")
+    if isinstance(symbol, dict):
+        lines.append(f"symbol: {symbol.get('name', '<unknown>')} ({symbol.get('type', '<unknown>')})")
+    functions = list(value.get("functions") or [])
+    lines.append("functions: " + (", ".join(str(item.get("name", "<unknown>")) for item in functions if isinstance(item, dict)) or "none"))
+    data = value.get("data_variable")
+    if isinstance(data, dict):
+        lines.append(f"data: {data.get('type', '<unknown>')} width={data.get('width', '<unknown>')}")
+    section = value.get("section")
+    if isinstance(section, dict):
+        lines.append(f"section: {section.get('name', '<unknown>')}")
+    segment = value.get("segment")
+    if isinstance(segment, dict):
+        permissions = "".join(
+            key for key, enabled in (("r", segment.get("readable")), ("w", segment.get("writable")), ("x", segment.get("executable"))) if enabled
+        )
+        lines.append(f"segment: {segment.get('start', '?')}..{segment.get('end', '?')} {permissions or '-'}")
+    return "\n".join(lines)
+
+
+def _render_data_read_text(value: Any) -> str:
+    if not isinstance(value, dict):
+        return _render_fallback_text(value)
+    values = value.get("values")
+    if isinstance(values, list):
+        def render_item(item: dict[str, Any]) -> str:
+            decoded = item.get("value", "<unknown>")
+            if isinstance(decoded, int):
+                decoded = f"{decoded} ({decoded:#x})"
+            return f"{item.get('address', '<unknown>')}  {decoded}"
+
+        return "\n".join(
+            render_item(item)
+            for item in values
+            if isinstance(item, dict)
+        )
+    return str(value.get("value", ""))
+
+
+def _render_search_text(value: Any) -> str:
+    metadata = None
+    if isinstance(value, dict) and isinstance(value.get("results"), list):
+        metadata = value
+        value = value["results"]
+    if not isinstance(value, list):
+        return _render_fallback_text(value)
+    if not value:
+        body = "none"
+    else:
+        body = "\n".join(
+        f"{item.get('address', '<unknown>')}  {item.get('function', '<unknown>')}  {item.get('text', '')}".rstrip()
+        for item in value
+        if isinstance(item, dict)
+        )
+    if metadata is not None and not metadata.get("complete", True):
+        body += (
+            f"\nwarning: search stopped by {metadata.get('stopped_reason', 'limit')} "
+            f"after {metadata.get('elapsed_seconds', '?')}s"
+        )
+    return body
+
+
+def _render_refs_text(value: Any) -> str:
+    if not isinstance(value, dict):
+        return _render_fallback_text(value)
+    function = value.get("function") if isinstance(value.get("function"), dict) else {}
+    lines = [f"{function.get('name', '<unknown>')} @ {function.get('address', '<unknown>')}"]
+    for label, key in (("code", "code_refs"), ("data", "data_refs")):
+        rows = list(value.get(key) or [])
+        lines.append(f"{label} refs:")
+        if not rows:
+            lines.append("- none")
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            target = row.get("symbol") or row.get("function") or row.get("target", "<unknown>")
+            lines.append(f"- {row.get('source', '<unknown>')} -> {row.get('target', '<unknown>')} {target}")
+    return "\n".join(lines)
+
+
 def _doctor(args: argparse.Namespace) -> int:
     install_dir = plugin_install_dir()
     source_dir = plugin_source_dir()
@@ -921,7 +1113,7 @@ def _doctor(args: argparse.Namespace) -> int:
     }
     if args.format == "text":
         result = _render_doctor_text(result)
-    _render_result(result, fmt=args.format, out_path=args.out, stem="doctor")
+    _render_direct_result(args, result, stem="doctor")
     return 0
 
 
@@ -930,15 +1122,14 @@ def _plugin_install(args: argparse.Namespace) -> int:
     dest = args.dest or plugin_install_dir()
     _install_tree(source, dest, mode=args.mode, force=args.force)
 
-    _render_result(
+    _render_direct_result(
+        args,
         {
             "installed": True,
             "mode": args.mode,
             "source": str(source),
             "destination": str(dest),
         },
-        fmt=args.format,
-        out_path=args.out,
         stem="plugin-install",
     )
     return 0
@@ -969,7 +1160,8 @@ def _skill_install(args: argparse.Namespace) -> int:
     dest = args.dest or skill_install_dir()
     _install_tree(source, dest, mode=args.mode, force=args.force)
 
-    _render_result(
+    _render_direct_result(
+        args,
         {
             "installed": True,
             "mode": args.mode,
@@ -977,8 +1169,6 @@ def _skill_install(args: argparse.Namespace) -> int:
             "source": str(source),
             "destination": str(dest),
         },
-        fmt=args.format,
-        out_path=args.out,
         stem="skill-install",
     )
     return 0
@@ -1070,6 +1260,18 @@ def _function_info(args: argparse.Namespace) -> int:
     )
 
 
+def _function_containing(args: argparse.Namespace) -> int:
+    return _call(
+        args,
+        "function_containing",
+        {"address": args.address},
+        require_target=True,
+        allow_implicit_target=True,
+        text_renderer=_render_function_identity_text,
+        stem="function-containing",
+    )
+
+
 def _decompile(args: argparse.Namespace) -> int:
     return _call(
         args,
@@ -1098,11 +1300,81 @@ def _disasm(args: argparse.Namespace) -> int:
     return _call(
         args,
         "disasm",
-        {"identifier": args.identifier},
+        {
+            "identifier": args.identifier,
+            "before": args.before_instructions,
+            "after": args.after_instructions,
+        },
         require_target=True,
         allow_implicit_target=True,
         text_renderer=_text_field("text"),
         stem="disasm",
+    )
+
+
+def _address_info(args: argparse.Namespace) -> int:
+    return _call(
+        args,
+        "address_info",
+        {"address": args.address},
+        require_target=True,
+        allow_implicit_target=True,
+        text_renderer=_render_address_info_text,
+        stem="address-info",
+    )
+
+
+def _data_read(args: argparse.Namespace) -> int:
+    return _call(
+        args,
+        "data_read",
+        {"address": args.address, "type": args.type, "count": args.count},
+        require_target=True,
+        allow_implicit_target=True,
+        text_renderer=_render_data_read_text,
+        stem="data-read",
+    )
+
+
+def _refs(args: argparse.Namespace) -> int:
+    return _call(
+        args,
+        "refs_from",
+        {"identifier": args.identifier},
+        require_target=True,
+        allow_implicit_target=True,
+        text_renderer=_render_refs_text,
+        stem="refs-from",
+    )
+
+
+def _search_text(args: argparse.Namespace) -> int:
+    return _call(
+        args,
+        "search_text",
+        {
+            "query": args.query,
+            "view": args.view,
+            "regex": bool(args.regex),
+            "max_results": args.max_results,
+            "max_seconds": args.timeout,
+        },
+        require_target=True,
+        allow_implicit_target=True,
+        text_renderer=_render_search_text,
+        stem="search-text",
+    )
+
+
+def _search_constant(args: argparse.Namespace) -> int:
+    return _call(
+        args,
+        "search_constant",
+        {"value": args.value, "max_results": args.max_results, "max_seconds": args.timeout},
+        require_target=True,
+        allow_implicit_target=True,
+        text_renderer=_render_search_text,
+        stem="search-constant",
     )
 
 
@@ -1145,12 +1417,14 @@ def _load_within_identifiers(path: Path) -> list[str]:
 def _callsites(args: argparse.Namespace) -> int:
     if args.within is not None:
         within_identifiers = [args.within]
-    else:
-        if args.within_file is None or not args.within_file.exists():
+    elif args.within_file is not None:
+        if not args.within_file.exists():
             raise BridgeError(f"Scope file not found: {args.within_file}")
         within_identifiers = _load_within_identifiers(args.within_file)
         if not within_identifiers:
             raise BridgeError(f"Scope file did not contain any function identifiers: {args.within_file}")
+    else:
+        within_identifiers = []
 
     return _call(
         args,
@@ -1507,7 +1781,31 @@ def _struct_field_delete(args: argparse.Namespace) -> int:
 
 
 def _batch_apply(args: argparse.Namespace) -> int:
-    manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+    if args.stdin and args.manifest is not None:
+        raise BridgeError("Pass either a manifest path or --stdin, not both")
+    if args.manifest is None and not args.stdin:
+        raise BridgeError("batch apply requires a manifest path or --stdin")
+    if args.stdin or str(args.manifest) == "-":
+        source = sys.stdin.read()
+        source_name = "stdin"
+    else:
+        if not args.manifest.exists():
+            raise BridgeError(f"Batch manifest not found: {args.manifest}")
+        source = args.manifest.read_text(encoding="utf-8")
+        source_name = str(args.manifest)
+    try:
+        payload = json.loads(source)
+    except json.JSONDecodeError:
+        try:
+            payload = [json.loads(line) for line in source.splitlines() if line.strip()]
+        except json.JSONDecodeError as exc:
+            raise BridgeError(f"Invalid JSON batch input from {source_name}: {exc}") from exc
+    if isinstance(payload, list):
+        manifest = {"ops": payload}
+    elif isinstance(payload, dict):
+        manifest = dict(payload)
+    else:
+        raise BridgeError("Batch input must be a JSON object, an operation array, or NDJSON operations")
     if args.preview:
         manifest["preview"] = True
     return _call(
@@ -1537,11 +1835,86 @@ def _add_function_address_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _schema_action(action: argparse.Action) -> dict[str, Any]:
+    value: dict[str, Any] = {
+        "dest": action.dest,
+        "required": bool(getattr(action, "required", False)),
+    }
+    if action.option_strings:
+        value["options"] = list(action.option_strings)
+    else:
+        value["positional"] = True
+    if action.nargs is not None:
+        value["nargs"] = action.nargs
+    if action.default not in (None, argparse.SUPPRESS):
+        value["default"] = action.default
+    choices = getattr(action, "choices", None)
+    if choices is not None and not isinstance(action, argparse._SubParsersAction):
+        value["choices"] = list(choices)
+    if action.help not in (None, argparse.SUPPRESS):
+        value["help"] = action.help
+    return value
+
+
+def _command_schema(parser: argparse.ArgumentParser) -> dict[str, Any]:
+    commands: dict[str, Any] = {}
+
+    def visit(current: argparse.ArgumentParser, path: list[str]) -> None:
+        actions = [
+            _schema_action(action)
+            for action in current._actions
+            if not isinstance(action, (argparse._HelpAction, _HelpFullAction, argparse._SubParsersAction))
+        ]
+        if path:
+            commands[" ".join(path)] = {
+                "description": current.description,
+                "arguments": actions,
+            }
+        for action in current._actions:
+            if not isinstance(action, argparse._SubParsersAction):
+                continue
+            for name, child in action.choices.items():
+                visit(child, [*path, name])
+
+    visit(parser, [])
+    global_arguments = [
+        _schema_action(action)
+        for action in parser._actions
+        if not isinstance(action, (argparse._HelpAction, _HelpFullAction, argparse._SubParsersAction))
+    ]
+    return {
+        "name": "bn",
+        "version": VERSION,
+        "protocol_version": PROTOCOL_VERSION,
+        "global_arguments": global_arguments,
+        "environment": {"BN_TARGET": "Default target selector"},
+        "commands": commands,
+    }
+
+
+def _schema(args: argparse.Namespace) -> int:
+    value = _command_schema(build_parser())
+    if args.format == "text":
+        value = "\n".join(sorted(value["commands"]))
+    _render_direct_result(args, value, stem="schema")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = BnArgumentParser(prog="bn", description="Agent-friendly Binary Ninja CLI")
     parser.set_defaults(handler=None)
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    parser.add_argument(
+        "--target",
+        dest="global_target",
+        help="Default target selector for the selected command (also available as BN_TARGET)",
+    )
 
     subparsers = parser.add_subparsers(dest="command")
+
+    schema = subparsers.add_parser("schema", help="Describe the complete command surface as data")
+    _common_io_options(schema, default_format="json")
+    schema.set_defaults(handler=_schema)
 
     doctor = subparsers.add_parser("doctor", help="Validate bridge discovery and installation")
     _common_io_options(doctor)
@@ -1603,6 +1976,14 @@ def build_parser() -> argparse.ArgumentParser:
     _target_option(function_info, required=False)
     function_info.add_argument("identifier")
     function_info.set_defaults(handler=_function_info)
+    function_containing = function_sub.add_parser(
+        "containing",
+        help="Resolve the function containing an arbitrary address",
+    )
+    _common_io_options(function_containing)
+    _target_option(function_containing, required=False)
+    function_containing.add_argument("address")
+    function_containing.set_defaults(handler=_function_containing)
 
     decompile = subparsers.add_parser("decompile", help="Render HLIL-style decompile text for a function")
     _common_io_options(decompile)
@@ -1619,10 +2000,44 @@ def build_parser() -> argparse.ArgumentParser:
     il.set_defaults(handler=_il)
 
     disasm = subparsers.add_parser("disasm", help="Disassemble a function")
-    _common_io_options(disasm)
+    _common_io_options(disasm, match_context=False)
     _target_option(disasm, required=False)
     disasm.add_argument("identifier")
+    disasm.add_argument(
+        "--before",
+        dest="before_instructions",
+        type=int,
+        help="Instructions before an address identifier (requires an address)",
+    )
+    disasm.add_argument(
+        "--after",
+        dest="after_instructions",
+        type=int,
+        help="Instructions after an address identifier (requires an address)",
+    )
     disasm.set_defaults(handler=_disasm)
+
+    address = subparsers.add_parser("address", help="Inspect arbitrary addresses")
+    address_sub = address.add_subparsers(dest="address_command")
+    address_info = address_sub.add_parser("info", help="Show symbols, functions, data, and mapping metadata")
+    _common_io_options(address_info)
+    _target_option(address_info, required=False)
+    address_info.add_argument("address")
+    address_info.set_defaults(handler=_address_info)
+
+    data = subparsers.add_parser("data", help="Read typed data from the selected BinaryView")
+    data_sub = data.add_subparsers(dest="data_command")
+    data_read = data_sub.add_parser("read", help="Read bytes, integers, pointers, floats, or C strings")
+    _common_io_options(data_read)
+    _target_option(data_read, required=False)
+    data_read.add_argument("address")
+    data_read.add_argument(
+        "--type",
+        choices=("bytes", "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "ptr", "cstr"),
+        default="bytes",
+    )
+    data_read.add_argument("--count", type=int)
+    data_read.set_defaults(handler=_data_read)
 
     xrefs = subparsers.add_parser("xrefs", help="List xrefs to an address or function, or `field <Struct.field>`")
     _common_io_options(xrefs)
@@ -1631,11 +2046,36 @@ def build_parser() -> argparse.ArgumentParser:
     xrefs.add_argument("extra", nargs="*")
     xrefs.set_defaults(handler=_xrefs)
 
+    refs = subparsers.add_parser("refs", help="List outbound code and data references from a function")
+    _common_io_options(refs)
+    _target_option(refs, required=False)
+    refs.add_argument("identifier")
+    refs.set_defaults(handler=_refs)
+
+    search = subparsers.add_parser("search", help="Search IL/disassembly text or integer constants")
+    search_sub = search.add_subparsers(dest="search_command")
+    search_text = search_sub.add_parser("text", help="Search rendered IL or disassembly lines")
+    _common_io_options(search_text)
+    _target_option(search_text, required=False)
+    search_text.add_argument("query")
+    search_text.add_argument("--view", choices=("hlil", "mlil", "llil", "disasm"), default="hlil")
+    search_text.add_argument("--regex", action="store_true")
+    search_text.add_argument("--max-results", type=int, default=200)
+    search_text.add_argument("--timeout", type=float, default=5.0, help="Stop the search after this many seconds")
+    search_text.set_defaults(handler=_search_text)
+    search_constant = search_sub.add_parser("constant", help="Find IL instructions containing an integer constant")
+    _common_io_options(search_constant)
+    _target_option(search_constant, required=False)
+    search_constant.add_argument("value")
+    search_constant.add_argument("--max-results", type=int, default=200)
+    search_constant.add_argument("--timeout", type=float, default=5.0, help="Stop the search after this many seconds")
+    search_constant.set_defaults(handler=_search_constant)
+
     callsites = subparsers.add_parser("callsites", help="Find direct native callsites and exact caller_static addresses")
     _common_io_options(callsites)
     _target_option(callsites, required=False)
     callsites.add_argument("callee")
-    scope = callsites.add_mutually_exclusive_group(required=True)
+    scope = callsites.add_mutually_exclusive_group()
     scope.add_argument("--within", help="Containing function to search for callsites")
     scope.add_argument("--within-file", type=Path, help="Text file with one containing-function identifier per line")
     callsites.add_argument(
@@ -1816,15 +2256,48 @@ def build_parser() -> argparse.ArgumentParser:
     batch_apply = batch_sub.add_parser("apply", help="Apply a JSON manifest")
     _common_io_options(batch_apply, default_format="json")
     batch_apply.add_argument("--preview", action="store_true")
-    batch_apply.add_argument("manifest", type=Path)
+    batch_apply.add_argument("--stdin", action="store_true", help="Read a manifest, operation array, or NDJSON from stdin")
+    batch_apply.add_argument("manifest", type=Path, nargs="?")
     batch_apply.set_defaults(handler=_batch_apply)
 
     return parser
 
 
+def _normalize_target_argv(argv: list[str]) -> list[str]:
+    targets: list[str] = []
+    remaining: list[str] = []
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token == "--target":
+            if index + 1 >= len(argv):
+                raise BridgeError("--target requires a selector")
+            targets.append(argv[index + 1])
+            index += 2
+            continue
+        if token.startswith("--target="):
+            targets.append(token.split("=", 1)[1])
+            index += 1
+            continue
+        remaining.append(token)
+        index += 1
+    unique = list(dict.fromkeys(targets))
+    if len(unique) > 1:
+        raise BridgeError("Conflicting target selectors: " + ", ".join(repr(item) for item in unique))
+    if unique:
+        return ["--target", unique[0], *remaining]
+    return remaining
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        normalized_argv = _normalize_target_argv(raw_argv)
+    except BridgeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    args = parser.parse_args(normalized_argv)
     handler: Callable[[argparse.Namespace], int] | None = getattr(args, "handler", None)
     if handler is None:
         selected_parser = getattr(args, "_parser", parser)
@@ -1834,5 +2307,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return handler(args)
     except BridgeError as exc:
-        print(str(exc), file=sys.stderr)
+        if getattr(args, "format", "text") in {"json", "ndjson"} and exc.details:
+            payload = {"ok": False, "error": exc.details}
+            rendered = json.dumps(payload, sort_keys=True)
+            if args.format == "json":
+                rendered = json.dumps(payload, indent=2, sort_keys=True)
+            print(rendered, file=sys.stderr)
+        else:
+            print(str(exc), file=sys.stderr)
         return 2
+    except BrokenPipeError:
+        return 0

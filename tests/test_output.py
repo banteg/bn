@@ -50,6 +50,22 @@ def test_write_output_spills_large_payload(tmp_path, monkeypatch):
     assert envelope["tokens"] == _token_count(artifact_text)
 
 
+def test_write_output_can_disable_automatic_spill(tmp_path, monkeypatch):
+    monkeypatch.setenv("BN_CACHE_DIR", str(tmp_path))
+    payload = "x" * 1000
+
+    rendered = write_output(
+        payload,
+        fmt="text",
+        out_path=None,
+        stem="streamed",
+        spill_token_limit=1,
+        allow_spill=False,
+    )
+
+    assert rendered == payload + "\n"
+
+
 def test_write_output_spills_text_payload_with_txt_suffix(tmp_path, monkeypatch):
     monkeypatch.setenv("BN_CACHE_DIR", str(tmp_path))
     payload = "\n".join(f"line {index} with distinctive content" for index in range(1000))

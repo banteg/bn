@@ -374,6 +374,29 @@ def test_refresh_updates_analysis_and_returns_target_info(monkeypatch):
     assert "refresh" in bv.events
 
 
+def test_restart_bridge_command_stops_before_starting(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    calls = []
+    monkeypatch.setattr(bridge, "_stop_bridge", lambda: calls.append("stop"))
+    monkeypatch.setattr(bridge, "start_bridge", lambda: calls.append("start"))
+
+    bridge._start_bridge_command(None)
+
+    assert calls == ["stop", "start"]
+
+
+def test_doctor_advertises_protocol_capabilities(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+    monkeypatch.setattr(instance.targets, "refresh", lambda: [])
+
+    result = instance._doctor()
+
+    assert result["protocol_version"] == 1
+    assert "py_exec" in result["capabilities"]["operations"]
+    assert result["capabilities"]["structured_errors"] is True
+
+
 def test_parse_declaration_source_uses_platform_parser_with_source_path(monkeypatch, tmp_path):
     bridge = _load_bridge(monkeypatch)
     instance = bridge.BinaryNinjaBridge()
@@ -694,6 +717,207 @@ def test_search_functions_rejects_invalid_regex(monkeypatch):
         instance._search_functions("active", "(", regex=True)
 
 
+def test_read_function_commands_accept_an_address_inside_a_function(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+    fn = _FakeFunction(0x401000, "player_update")
+    bv = _FakeBV(functions=[fn])
+    bv.get_functions_containing = lambda address: [fn] if 0x401000 <= address < 0x401100 else []
+
+    assert instance._find_function(bv, "0x401020", allow_containing=True) is fn
+    with pytest.raises(bridge.OperationFailure, match="Function not found"):
+        instance._find_function(bv, "0x401020")
+
+
+def test_address_resolver_supports_data_symbols_and_offsets(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+    symbol = bridge.bn.Symbol(bridge.bn.SymbolType.DataSymbol, 0x500000, "player_table")
+    bv = _FakeBV(symbols=[symbol])
+
+    assert instance._resolve_address(bv, "player_table") == 0x500000
+    assert instance._resolve_address(bv, "player_table+0x28") == 0x500028
+
+
+def test_data_read_decodes_typed_values(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+    bv = _FakeBV()
+    bv.endianness = "LittleEndian"
+    bv.address_size = 8
+    bv.read = lambda address, length: b"\x78\x56\x34\x12"[:length]
+    monkeypatch.setattr(instance, "_resolve_view", lambda selector: bv)
+
+    result = instance._data_read("active", "0x500000", value_type="u32", count=1)
+
+    assert result["values"] == [{"address": "0x500000", "value": 0x12345678}]
+
+
+def test_disasm_can_render_an_address_window(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+    fn = _FakeFunction(0x401000, "player_update")
+    fn.basic_blocks = [_FakeBasicBlock(0x401000, 0x401003)]
+    bv = _FakeBV(
+        functions=[fn],
+        disassembly={0x401000: "push ebp", 0x401001: "mov ebp, esp", 0x401002: "ret"},
+        instruction_lengths={0x401000: 1, 0x401001: 1, 0x401002: 1},
+    )
+    bv.get_functions_containing = lambda address: [fn]
+    monkeypatch.setattr(instance, "_resolve_view", lambda selector: bv)
+
+    result = instance._disasm("active", "0x401001", before=1, after=1)
+
+    assert "> 00401001" in result["text"]
+    assert "push ebp" in result["text"]
+    assert "ret" in result["text"]
+
+
+def test_search_constant_walks_llil_operands(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+    fn = _FakeFunction(0x401000, "player_update")
+    insn = _FakeLLILInstruction(0x401020, _FakeConstPtr(0x370), operation="LLIL_SET_REG")
+    insn.operands = [insn.dest]
+    fn.low_level_il = [[insn]]
+    bv = _FakeBV(functions=[fn])
+    monkeypatch.setattr(instance, "_resolve_view", lambda selector: bv)
+
+    result = instance._search_constant("active", "0x370", max_results=20)
+
+    assert result["results"][0]["address"] == "0x401020"
+    assert result["results"][0]["value"] == 0x370
+
+
+def test_search_text_uses_binary_ninja_index_when_available(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+    fn = _FakeFunction(0x401000, "player_update")
+    bv = _FakeBV(functions=[fn])
+    bv.start = 0x400000
+    bv.end = 0x500000
+    calls = []
+
+    class _Line:
+        function = fn
+
+        def __str__(self):
+            return "eax = crt_rand()"
+
+    def find_all_text(start, end, text, **kwargs):
+        calls.append((start, end, text))
+        kwargs["match_callback"](0x401020, text, _Line())
+        return True
+
+    bv.find_all_text = find_all_text
+    monkeypatch.setattr(instance, "_resolve_view", lambda selector: bv)
+
+    result = instance._search_text(
+        "active",
+        "crt_rand",
+        view="hlil",
+        regex=False,
+        max_results=20,
+    )
+
+    assert calls == [(0x400000, 0x500000, "crt_rand")]
+    assert result["complete"] is True
+    assert result["results"] == [
+        {
+            "address": "0x401020",
+            "function": "player_update",
+            "view": "hlil",
+            "text": "eax = crt_rand()",
+        }
+    ]
+
+
+def test_search_constant_uses_text_index_and_verifies_token_value(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+    fn = _FakeFunction(0x401000, "player_update")
+    bv = _FakeBV(functions=[fn])
+    bv.start = 0x400000
+    bv.end = 0x500000
+    terms = []
+
+    class _Line:
+        function = fn
+        contents = types.SimpleNamespace(tokens=[types.SimpleNamespace(value=0x370)])
+
+        def __str__(self):
+            return "eax = 0x370"
+
+    def find_all_text(start, end, text, **kwargs):
+        terms.append(text)
+        kwargs["match_callback"](0x401020, text, _Line())
+        return True
+
+    bv.find_all_text = find_all_text
+    monkeypatch.setattr(instance, "_resolve_view", lambda selector: bv)
+
+    result = instance._search_constant("active", "0x370", max_results=20)
+
+    assert terms == ["0x370", "880"]
+    assert len(result["results"]) == 1
+    assert result["results"][0]["value"] == 0x370
+
+
+def test_search_reports_timeout_metadata(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+    bv = _FakeBV()
+    bv.start = 0x400000
+    bv.end = 0x500000
+    bv.find_all_text = lambda *args, **kwargs: True
+    ticks = iter([0.0, 10.0, 10.0])
+    monkeypatch.setattr(bridge.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(instance, "_resolve_view", lambda selector: bv)
+
+    result = instance._search_text(
+        "active",
+        "missing",
+        view="disasm",
+        regex=False,
+        max_results=20,
+        max_seconds=5.0,
+    )
+
+    assert result["results"] == []
+    assert result["complete"] is False
+    assert result["stopped_reason"] == "timeout"
+
+
+def test_py_exec_exposes_stable_helpers_and_full_view(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+    fn = _FakeFunction(0x401000, "player_update")
+    bv = _FakeBV(functions=[fn])
+    bv.endianness = "LittleEndian"
+    bv.get_functions_containing = lambda address: [fn]
+    monkeypatch.setattr(instance, "_resolve_view", lambda selector: bv)
+
+    result = instance._py_exec(
+        "active",
+        "result = {'value': read_u32(0x401000), 'same': current_view is bv, 'name': function(0x401020).name}",
+    )
+
+    assert result["result"] == {"value": 0x90909090, "same": True, "name": "player_update"}
+
+
+def test_py_exec_reports_traceback_as_structured_error(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+    bv = _FakeBV()
+    monkeypatch.setattr(instance, "_resolve_view", lambda selector: bv)
+
+    with pytest.raises(bridge.OperationFailure) as exc_info:
+        instance._py_exec("active", "raise ValueError('boom')")
+
+    assert exc_info.value.status == "python_error"
+    assert "ValueError: boom" in exc_info.value.observed["traceback"]
+
+
 def test_callsites_returns_local_hlil_assignment_and_pre_branch_condition(monkeypatch):
     bridge = _load_bridge(monkeypatch)
     instance = bridge.BinaryNinjaBridge()
@@ -788,6 +1012,27 @@ def test_callsites_returns_local_hlil_assignment_and_pre_branch_condition(monkey
     assert [item["address"] for item in rows[0]["previous_instructions"]] == ["0x41249c", "0x41249e"]
     assert rows[0]["call_instruction"]["text"] == "call crt_rand"
     assert [item["address"] for item in rows[0]["next_instructions"][:1]] == ["0x4124a5"]
+
+
+def test_callsites_derives_scope_from_inbound_code_refs(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+    callee = _FakeFunction(0x461746, "crt_rand")
+    caller = _FakeFunction(0x412470, "bonus_pick_random_type")
+    caller.basic_blocks = [_FakeBasicBlock(0x4124A0, 0x4124A5)]
+    caller.low_level_il = [[_FakeLLILInstruction(0x4124A0, _FakeConstPtr(0x461746))]]
+    bv = _FakeBV(
+        functions=[callee, caller],
+        instruction_lengths={0x4124A0: 5},
+        disassembly={0x4124A0: "call crt_rand"},
+    )
+    bv.get_code_refs = lambda address: [types.SimpleNamespace(address=0x4124A0, function=caller)]
+    monkeypatch.setattr(instance, "_resolve_view", lambda selector: bv)
+
+    rows = instance._callsites("active", "crt_rand", within_identifiers=[], context=0)
+
+    assert rows[0]["within_query"] == "bonus_pick_random_type"
+    assert rows[0]["caller_static"] == "0x4124a5"
 
 
 def test_callsites_prefers_local_expression_over_broad_enclosing_hlil(monkeypatch):

@@ -5,6 +5,7 @@ from pathlib import Path
 
 
 VERSION = "0.12.3"
+PROTOCOL_VERSION = 1
 
 
 def build_id_for_file(path: Path) -> str | None:

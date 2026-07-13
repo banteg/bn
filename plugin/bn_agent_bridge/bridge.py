@@ -10,7 +10,9 @@ import json
 import os
 import re
 import socketserver
+import struct as pystruct
 import threading
+import time
 import traceback
 import weakref
 from dataclasses import dataclass
@@ -23,7 +25,7 @@ from binaryninja.mainthread import execute_on_main_thread_and_wait, is_main_thre
 from binaryninja.plugin import PluginCommand
 
 from .paths import PLUGIN_NAME, bridge_registry_path, bridge_socket_path
-from .version import VERSION, build_id_for_file
+from .version import PROTOCOL_VERSION, VERSION, build_id_for_file
 
 try:
     import binaryninjaui as ui
@@ -34,7 +36,7 @@ except ImportError:  # pragma: no cover - GUI plugin only
 PLUGIN_BUILD_ID = build_id_for_file(Path(__file__).resolve())
 
 
-def _json_response(*, ok: bool, result: Any = None, error: str | None = None) -> dict[str, Any]:
+def _json_response(*, ok: bool, result: Any = None, error: Any = None) -> dict[str, Any]:
     return {"ok": ok, "result": result, "error": error}
 
 
@@ -52,6 +54,77 @@ class OperationFailure(RuntimeError):
         self.message = message
         self.requested = requested or {}
         self.observed = observed or {}
+
+
+class _PythonContext:
+    """Small stable helpers for scripts while retaining the complete Binary Ninja API."""
+
+    def __init__(self, bridge: "BinaryNinjaBridge", bv: Any):
+        self.bridge = bridge
+        self.bv = bv
+
+    @property
+    def byte_order(self) -> str:
+        return "little" if "little" in str(getattr(self.bv, "endianness", "little")).lower() else "big"
+
+    def address(self, identifier: Any) -> int:
+        return self.bridge._resolve_address(self.bv, identifier)
+
+    def function(self, identifier: Any, *, containing: bool = True) -> Any:
+        return self.bridge._find_function(self.bv, identifier, allow_containing=containing)
+
+    def functions_containing(self, address: Any) -> list[Any]:
+        return self.bridge._functions_containing(self.bv, self.address(address))
+
+    def read(self, address: Any, size: int) -> bytes:
+        resolved = self.address(address)
+        data = bytes(self.bv.read(resolved, int(size)))
+        if len(data) != int(size):
+            raise RuntimeError(f"Could not read {size} bytes at {hex(resolved)}")
+        return data
+
+    def _read_int(self, address: Any, size: int, *, signed: bool = False) -> int:
+        return int.from_bytes(self.read(address, size), byteorder=self.byte_order, signed=signed)
+
+    def read_u8(self, address: Any) -> int:
+        return self._read_int(address, 1)
+
+    def read_u16(self, address: Any) -> int:
+        return self._read_int(address, 2)
+
+    def read_u32(self, address: Any) -> int:
+        return self._read_int(address, 4)
+
+    def read_u64(self, address: Any) -> int:
+        return self._read_int(address, 8)
+
+    def read_i8(self, address: Any) -> int:
+        return self._read_int(address, 1, signed=True)
+
+    def read_i16(self, address: Any) -> int:
+        return self._read_int(address, 2, signed=True)
+
+    def read_i32(self, address: Any) -> int:
+        return self._read_int(address, 4, signed=True)
+
+    def read_i64(self, address: Any) -> int:
+        return self._read_int(address, 8, signed=True)
+
+    def read_ptr(self, address: Any) -> int:
+        return self._read_int(address, int(getattr(self.bv, "address_size", 8)))
+
+    def read_f32(self, address: Any) -> float:
+        prefix = "<" if self.byte_order == "little" else ">"
+        return float(pystruct.unpack(prefix + "f", self.read(address, 4))[0])
+
+    def read_f64(self, address: Any) -> float:
+        prefix = "<" if self.byte_order == "little" else ">"
+        return float(pystruct.unpack(prefix + "d", self.read(address, 8))[0])
+
+    def read_cstr(self, address: Any, max_length: int = 4096) -> str:
+        resolved = self.address(address)
+        data = bytes(self.bv.read(resolved, int(max_length)))
+        return data.split(b"\0", 1)[0].decode("utf-8", errors="replace")
 
 
 class _ReadWriteLock:
@@ -89,6 +162,9 @@ class _ReadWriteLock:
 
 
 READ_LOCKED_OPS = {
+    "address_info",
+    "data_read",
+    "function_containing",
     "function_info",
     "get_prototype",
     "list_functions",
@@ -99,7 +175,10 @@ READ_LOCKED_OPS = {
     "il",
     "disasm",
     "xrefs",
+    "refs_from",
     "field_xrefs",
+    "search_text",
+    "search_constant",
     "types",
     "type_info",
     "strings",
@@ -516,8 +595,24 @@ class BinaryNinjaBridge:
             with lock:
                 result = self._dispatch_on_main(op, params, target)
             return _json_response(ok=True, result=result)
+        except OperationFailure as exc:
+            return _json_response(
+                ok=False,
+                error={
+                    "code": exc.status,
+                    "message": exc.message,
+                    "requested": exc.requested,
+                    "observed": exc.observed,
+                },
+            )
         except Exception as exc:
-            return _json_response(ok=False, error=f"{type(exc).__name__}: {exc}")
+            return _json_response(
+                ok=False,
+                error={
+                    "code": type(exc).__name__,
+                    "message": str(exc),
+                },
+            )
 
     def _dispatch_on_main(self, op: str, params: dict[str, Any], target: str | None):
         if op == "doctor":
@@ -528,6 +623,16 @@ class BinaryNinjaBridge:
             return self._target_info(params.get("selector") or target)
         if op == "refresh":
             return self._refresh(target)
+
+        if op == "address_info":
+            return self._address_info(target, params["address"])
+        if op == "data_read":
+            return self._data_read(
+                target,
+                params["address"],
+                value_type=str(params.get("type", "bytes")),
+                count=params.get("count"),
+            )
 
         if op == "list_functions":
             return self._list_functions(
@@ -552,6 +657,8 @@ class BinaryNinjaBridge:
             )
         if op == "function_info":
             return self._function_info(target, params["identifier"])
+        if op == "function_containing":
+            return self._function_containing(target, params["address"])
         if op == "get_prototype":
             return self._get_prototype(target, params["identifier"])
         if op == "list_locals":
@@ -561,11 +668,34 @@ class BinaryNinjaBridge:
         if op == "il":
             return self._il(target, params["identifier"], str(params.get("view", "hlil")), bool(params.get("ssa")))
         if op == "disasm":
-            return self._disasm(target, params["identifier"])
+            return self._disasm(
+                target,
+                params["identifier"],
+                before=params.get("before"),
+                after=params.get("after"),
+            )
         if op == "xrefs":
             return self._xrefs(target, params["identifier"])
+        if op == "refs_from":
+            return self._refs_from(target, params["identifier"])
         if op == "field_xrefs":
             return self._field_xrefs(target, str(params["field"]))
+        if op == "search_text":
+            return self._search_text(
+                target,
+                str(params.get("query", "")),
+                view=str(params.get("view", "hlil")),
+                regex=bool(params.get("regex")),
+                max_results=int(params.get("max_results", 200)),
+                max_seconds=float(params.get("max_seconds", 5.0)),
+            )
+        if op == "search_constant":
+            return self._search_constant(
+                target,
+                params["value"],
+                max_results=int(params.get("max_results", 200)),
+                max_seconds=float(params.get("max_seconds", 5.0)),
+            )
         if op == "types":
             return self._types(
                 target,
@@ -625,13 +755,28 @@ class BinaryNinjaBridge:
         raise ValueError(f"Unknown operation: {op}")
 
     def _doctor(self):
+        operations = {
+            "doctor",
+            "list_targets",
+            "target_info",
+            *READ_LOCKED_OPS,
+            *WRITE_LOCKED_OPS,
+        }
         return {
             "plugin_name": PLUGIN_NAME,
             "plugin_version": VERSION,
+            "protocol_version": PROTOCOL_VERSION,
             "plugin_build_id": PLUGIN_BUILD_ID,
             "pid": os.getpid(),
             "socket_path": str(self.socket_path),
             "targets": self.targets.refresh(),
+            "capabilities": {
+                "operations": sorted(operations),
+                "structured_errors": True,
+                "schema_command": True,
+                "global_target": True,
+                "python_helpers": True,
+            },
         }
 
     def _target_info(self, selector: str | None):
@@ -666,12 +811,24 @@ class BinaryNinjaBridge:
     def _resolve_view(self, selector: str | None):
         return self.targets.resolve(selector)
 
-    def _find_function(self, bv, identifier):
+    def _find_function(self, bv, identifier, *, allow_containing: bool = False):
         try:
             addr = _parse_address(identifier)
             fn = bv.get_function_at(addr)
             if fn is not None:
                 return fn
+            if allow_containing:
+                containing = self._functions_containing(bv, addr)
+                if len(containing) == 1:
+                    return containing[0]
+                if len(containing) > 1:
+                    names = ", ".join(f"{fn.name}@{hex(int(fn.start))}" for fn in containing)
+                    raise OperationFailure(
+                        "ambiguous_function",
+                        f"Address {hex(addr)} belongs to multiple functions: {names}",
+                    )
+        except OperationFailure:
+            raise
         except Exception:
             pass
 
@@ -680,20 +837,34 @@ class BinaryNinjaBridge:
         if len(exact) == 1:
             return exact[0]
         if len(exact) > 1:
-            raise RuntimeError(f"Ambiguous function identifier: {identifier}")
+            raise OperationFailure(
+                "ambiguous_function",
+                f"Ambiguous function identifier: {identifier}",
+                observed={"candidates": [self._function_entry(fn) for fn in exact]},
+            )
 
         folded = self._find_functions_by_name(bv, text, case_sensitive=False)
         if len(folded) == 1:
             return folded[0]
         if len(folded) > 1:
-            raise RuntimeError(f"Ambiguous function identifier: {identifier}")
+            raise OperationFailure(
+                "ambiguous_function",
+                f"Ambiguous function identifier: {identifier}",
+                observed={"candidates": [self._function_entry(fn) for fn in folded]},
+            )
 
         symbol = bv.get_symbol_by_raw_name(text)
         if symbol is not None:
             fn = bv.get_function_at(symbol.address)
             if fn is not None:
                 return fn
-        raise RuntimeError(f"Function not found: {identifier}")
+        available = [str(fn.name) for fn in list(bv.functions)]
+        suggestions = difflib.get_close_matches(text, available, n=5, cutoff=0.5)
+        raise OperationFailure(
+            "function_not_found",
+            f"Function not found: {identifier}",
+            observed={"suggestions": suggestions},
+        )
 
     def _find_functions_by_name(self, bv, text: str, *, case_sensitive: bool) -> list[Any]:
         matches = []
@@ -718,7 +889,7 @@ class BinaryNinjaBridge:
         resolved = []
         seen: set[int] = set()
         for identifier in identifiers:
-            fn = self._find_function(bv, identifier)
+            fn = self._find_function(bv, identifier, allow_containing=True)
             marker = int(fn.start)
             if marker in seen:
                 continue
@@ -750,6 +921,191 @@ class BinaryNinjaBridge:
             seen.add(marker)
             matches.append(symbol)
         return matches
+
+    def _resolve_address(self, bv, identifier: Any) -> int:
+        try:
+            return _parse_address(identifier)
+        except Exception:
+            pass
+
+        text = str(identifier).strip()
+        offset_match = re.fullmatch(r"(.+?)([+-])(0x[0-9a-fA-F]+|[0-9]+)", text)
+        if offset_match is not None:
+            base = self._resolve_address(bv, offset_match.group(1))
+            offset = _parse_address(offset_match.group(3))
+            return base + offset if offset_match.group(2) == "+" else base - offset
+
+        for case_sensitive in (True, False):
+            symbols = self._find_symbols_by_name(bv, text, case_sensitive=case_sensitive)
+            addresses = sorted({int(symbol.address) for symbol in symbols})
+            if len(addresses) == 1:
+                return addresses[0]
+            if len(addresses) > 1:
+                rendered = ", ".join(hex(address) for address in addresses[:8])
+                raise OperationFailure(
+                    "ambiguous_symbol",
+                    f"Ambiguous symbol identifier {identifier!r}: {rendered}",
+                )
+
+            functions = self._find_functions_by_name(bv, text, case_sensitive=case_sensitive)
+            addresses = sorted({int(fn.start) for fn in functions})
+            if len(addresses) == 1:
+                return addresses[0]
+            if len(addresses) > 1:
+                rendered = ", ".join(hex(address) for address in addresses[:8])
+                raise OperationFailure(
+                    "ambiguous_function",
+                    f"Ambiguous function identifier {identifier!r}: {rendered}",
+                )
+
+        raise OperationFailure("address_not_found", f"Address or symbol not found: {identifier}")
+
+    def _function_entry(self, fn) -> dict[str, Any]:
+        return {
+            "name": str(fn.name),
+            "address": hex(int(fn.start)),
+            "raw_name": str(getattr(fn, "raw_name", fn.name)),
+        }
+
+    def _function_containing(self, selector: str | None, address_value: Any):
+        bv = self._resolve_view(selector)
+        address = self._resolve_address(bv, address_value)
+        functions = self._functions_containing(bv, address)
+        if not functions:
+            raise OperationFailure("function_not_found", f"No function contains {hex(address)}")
+        if len(functions) > 1:
+            names = ", ".join(f"{fn.name}@{hex(int(fn.start))}" for fn in functions)
+            raise OperationFailure(
+                "ambiguous_function",
+                f"Address {hex(address)} belongs to multiple functions: {names}",
+            )
+        return {
+            "query_address": hex(address),
+            "function": self._function_entry(functions[0]),
+        }
+
+    def _address_info(self, selector: str | None, address_value: Any):
+        bv = self._resolve_view(selector)
+        address = self._resolve_address(bv, address_value)
+        functions = [self._function_entry(fn) for fn in self._functions_containing(bv, address)]
+        value: dict[str, Any] = {
+            "address": hex(address),
+            "functions": functions,
+        }
+
+        symbol = None
+        with contextlib.suppress(Exception):
+            symbol = bv.get_symbol_at(address)
+        if symbol is not None:
+            value["symbol"] = {
+                "name": str(getattr(symbol, "name", "")),
+                "raw_name": str(getattr(symbol, "raw_name", "")),
+                "type": str(getattr(symbol, "type", "")),
+            }
+
+        data_var = None
+        with contextlib.suppress(Exception):
+            data_var = bv.get_data_var_at(address)
+        if data_var is not None:
+            data_type = getattr(data_var, "type", None)
+            value["data_variable"] = {
+                "address": hex(int(getattr(data_var, "address", address))),
+                "type": str(data_type),
+                "width": int(getattr(data_type, "width", 0)),
+            }
+
+        section = None
+        with contextlib.suppress(Exception):
+            section = bv.get_section_at(address)
+        if section is not None:
+            value["section"] = {
+                "name": str(getattr(section, "name", section)),
+                "start": hex(int(getattr(section, "start", address))),
+                "end": hex(int(getattr(section, "end", address))),
+            }
+
+        segment = None
+        with contextlib.suppress(Exception):
+            segment = bv.get_segment_at(address)
+        if segment is not None:
+            value["segment"] = {
+                "start": hex(int(getattr(segment, "start", address))),
+                "end": hex(int(getattr(segment, "end", address))),
+                "readable": bool(getattr(segment, "readable", False)),
+                "writable": bool(getattr(segment, "writable", False)),
+                "executable": bool(getattr(segment, "executable", False)),
+            }
+        return value
+
+    def _data_read(
+        self,
+        selector: str | None,
+        address_value: Any,
+        *,
+        value_type: str,
+        count: Any,
+    ):
+        bv = self._resolve_view(selector)
+        address = self._resolve_address(bv, address_value)
+        if count is None:
+            count = 256 if value_type == "cstr" else 16 if value_type == "bytes" else 1
+        count = int(count)
+        if count <= 0 or count > 1_000_000:
+            raise OperationFailure("invalid_count", "Data read count must be between 1 and 1000000")
+
+        byte_order = "little" if "little" in str(getattr(bv, "endianness", "little")).lower() else "big"
+        if value_type == "bytes":
+            data = bytes(bv.read(address, count))
+            return {
+                "address": hex(address),
+                "type": value_type,
+                "count": len(data),
+                "value": data.hex(),
+                "ascii": "".join(chr(byte) if 32 <= byte < 127 else "." for byte in data),
+            }
+        if value_type == "cstr":
+            data = bytes(bv.read(address, count))
+            raw = data.split(b"\0", 1)[0]
+            return {
+                "address": hex(address),
+                "type": value_type,
+                "count": len(raw),
+                "value": raw.decode("utf-8", errors="replace"),
+                "terminated": len(raw) < len(data),
+            }
+
+        pointer_width = int(getattr(bv, "address_size", 8))
+        widths = {
+            "u8": 1, "i8": 1,
+            "u16": 2, "i16": 2,
+            "u32": 4, "i32": 4, "f32": 4,
+            "u64": 8, "i64": 8, "f64": 8,
+            "ptr": pointer_width,
+        }
+        width = widths.get(value_type)
+        if width is None:
+            raise OperationFailure("invalid_data_type", f"Unsupported data type: {value_type}")
+        signed = value_type.startswith("i")
+        float_formats = {"f32": "f", "f64": "d"}
+        prefix = "<" if byte_order == "little" else ">"
+        values = []
+        for index in range(count):
+            item_address = address + index * width
+            data = bytes(bv.read(item_address, width))
+            if len(data) != width:
+                raise OperationFailure("short_read", f"Could not read {width} bytes at {hex(item_address)}")
+            if value_type in float_formats:
+                decoded: Any = pystruct.unpack(prefix + float_formats[value_type], data)[0]
+            else:
+                decoded = int.from_bytes(data, byteorder=byte_order, signed=signed)
+            values.append({"address": hex(item_address), "value": decoded})
+        return {
+            "address": hex(address),
+            "type": value_type,
+            "width": width,
+            "count": count,
+            "values": values,
+        }
 
     def _resolve_rename_target(self, bv, identifier: Any, kind: str) -> dict[str, Any]:
         requested = {
@@ -1412,7 +1768,21 @@ class BinaryNinjaBridge:
 
         bv = self._resolve_view(selector)
         callee = self._find_function(bv, callee_identifier)
-        scope_functions = self._resolve_scope_functions(bv, within_identifiers)
+        if within_identifiers:
+            scope_functions = self._resolve_scope_functions(bv, within_identifiers)
+        else:
+            scope_functions = []
+            seen: set[int] = set()
+            for ref in list(bv.get_code_refs(int(callee.start))):
+                func = getattr(ref, "function", None)
+                if func is None:
+                    containing = self._functions_containing(bv, int(ref.address))
+                    func = containing[0] if len(containing) == 1 else None
+                if func is None or int(func.start) in seen:
+                    continue
+                seen.add(int(func.start))
+                scope_functions.append((str(func.name), func))
+            scope_functions.sort(key=lambda item: int(item[1].start))
 
         rows = []
         for within_query, func in scope_functions:
@@ -1523,7 +1893,7 @@ class BinaryNinjaBridge:
 
     def _decompile(self, selector: str | None, identifier):
         bv = self._resolve_view(selector)
-        func = self._find_function(bv, identifier)
+        func = self._find_function(bv, identifier, allow_containing=True)
         text = self._function_text(bv, func, view="hlil")
         warnings = self._render_warnings(text)
         return {
@@ -1534,7 +1904,7 @@ class BinaryNinjaBridge:
 
     def _function_info(self, selector: str | None, identifier):
         bv = self._resolve_view(selector)
-        func = self._find_function(bv, identifier)
+        func = self._find_function(bv, identifier, allow_containing=True)
         metadata = self._function_metadata(func)
         variables = self._list_locals(func)
         parameters = [item for item in variables if item["is_parameter"]]
@@ -1552,7 +1922,7 @@ class BinaryNinjaBridge:
 
     def _get_prototype(self, selector: str | None, identifier):
         bv = self._resolve_view(selector)
-        func = self._find_function(bv, identifier)
+        func = self._find_function(bv, identifier, allow_containing=True)
         return {
             "function": {
                 "name": func.name,
@@ -1564,7 +1934,7 @@ class BinaryNinjaBridge:
 
     def _list_locals_for_function(self, selector: str | None, identifier):
         bv = self._resolve_view(selector)
-        func = self._find_function(bv, identifier)
+        func = self._find_function(bv, identifier, allow_containing=True)
         variables = self._list_locals(func)
         return {
             "function": {
@@ -1577,7 +1947,7 @@ class BinaryNinjaBridge:
 
     def _il(self, selector: str | None, identifier, view: str, ssa: bool):
         bv = self._resolve_view(selector)
-        func = self._find_function(bv, identifier)
+        func = self._find_function(bv, identifier, allow_containing=True)
         text = self._function_text(bv, func, view=view, ssa=ssa)
         return {
             "function": {"name": func.name, "address": hex(func.start)},
@@ -1587,21 +1957,402 @@ class BinaryNinjaBridge:
             "warnings": self._render_warnings(text),
         }
 
-    def _disasm(self, selector: str | None, identifier):
+    def _disasm(
+        self,
+        selector: str | None,
+        identifier,
+        *,
+        before: Any = None,
+        after: Any = None,
+    ):
         bv = self._resolve_view(selector)
-        func = self._find_function(bv, identifier)
+        func = self._find_function(bv, identifier, allow_containing=True)
+        if before is None and after is None:
+            text = self._disasm_text(bv, func)
+        else:
+            try:
+                address = _parse_address(identifier)
+            except Exception as exc:
+                raise OperationFailure(
+                    "address_required",
+                    "Disassembly windows require an address identifier",
+                ) from exc
+            before_count = int(before or 0)
+            after_count = int(after or 0)
+            if before_count < 0 or after_count < 0:
+                raise OperationFailure("invalid_context", "Disassembly context must be non-negative")
+            entries = self._structured_disasm_entries(bv, func)
+            index = next(
+                (index for index, item in enumerate(entries) if int(item["_address_int"]) == address),
+                None,
+            )
+            if index is None:
+                raise OperationFailure(
+                    "instruction_not_found",
+                    f"No instruction starts at {hex(address)}",
+                )
+            selected = entries[max(0, index - before_count) : index + after_count + 1]
+            lines = []
+            for item in selected:
+                item_address = int(item["_address_int"])
+                length = self._instruction_length(bv, item_address)
+                raw = bytes(bv.read(item_address, length))
+                marker = ">" if item_address == address else " "
+                lines.append(f"{marker} {item_address:08x}  {raw.hex(' '):<16} {item['text']}")
+            text = "\n".join(lines)
         return {
             "function": {"name": func.name, "address": hex(func.start)},
-            "text": self._disasm_text(bv, func),
+            "text": text,
         }
 
     def _xrefs(self, selector: str | None, identifier):
         bv = self._resolve_view(selector)
-        try:
-            address = _parse_address(identifier)
-        except Exception:
-            address = self._find_function(bv, identifier).start
+        address = self._resolve_address(bv, identifier)
         return self._xrefs_to_address(bv, address)
+
+    def _refs_from(self, selector: str | None, identifier):
+        bv = self._resolve_view(selector)
+        func = self._find_function(bv, identifier, allow_containing=True)
+        code_refs = []
+        data_refs = []
+        seen_code: set[tuple[int, int]] = set()
+        seen_data: set[tuple[int, int]] = set()
+        for item in self._structured_disasm_entries(bv, func):
+            source = int(item["_address_int"])
+            if hasattr(bv, "get_code_refs_from"):
+                for ref in list(bv.get_code_refs_from(source)):
+                    target = int(getattr(ref, "address", ref))
+                    marker = (source, target)
+                    if marker in seen_code:
+                        continue
+                    seen_code.add(marker)
+                    symbol = bv.get_symbol_at(target)
+                    containing = self._functions_containing(bv, target)
+                    code_refs.append(
+                        {
+                            "source": hex(source),
+                            "target": hex(target),
+                            "symbol": str(symbol.name) if symbol is not None else None,
+                            "function": str(containing[0].name) if len(containing) == 1 else None,
+                        }
+                    )
+            if hasattr(bv, "get_data_refs_from"):
+                for ref in list(bv.get_data_refs_from(source)):
+                    target = int(getattr(ref, "address", ref))
+                    marker = (source, target)
+                    if marker in seen_data:
+                        continue
+                    seen_data.add(marker)
+                    symbol = bv.get_symbol_at(target)
+                    data_refs.append(
+                        {
+                            "source": hex(source),
+                            "target": hex(target),
+                            "symbol": str(symbol.name) if symbol is not None else None,
+                        }
+                    )
+        return {
+            "function": self._function_entry(func),
+            "code_refs": code_refs,
+            "data_refs": data_refs,
+        }
+
+    def _search_payload(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        started: float,
+        timed_out: bool,
+        max_results: int,
+    ) -> dict[str, Any]:
+        stopped_reason = None
+        if timed_out:
+            stopped_reason = "timeout"
+        elif len(rows) >= max_results:
+            stopped_reason = "result_limit"
+        return {
+            "results": rows,
+            "complete": stopped_reason is None,
+            "stopped_reason": stopped_reason,
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+        }
+
+    def _search_text(
+        self,
+        selector: str | None,
+        query: str,
+        *,
+        view: str,
+        regex: bool,
+        max_results: int,
+        max_seconds: float = 5.0,
+    ) -> dict[str, Any]:
+        if max_results <= 0:
+            raise OperationFailure("invalid_limit", "Search result limit must be positive")
+        if max_seconds <= 0:
+            raise OperationFailure("invalid_timeout", "Search timeout must be positive")
+        if view not in {"hlil", "mlil", "llil", "disasm"}:
+            raise OperationFailure("invalid_view", f"Unsupported search view: {view}")
+        started = time.monotonic()
+        deadline = started + max_seconds
+        timed_out = False
+        bv = self._resolve_view(selector)
+        if regex:
+            try:
+                pattern = re.compile(query, re.IGNORECASE)
+            except re.error as exc:
+                raise OperationFailure("invalid_regex", f"Invalid search regex: {exc}") from exc
+
+            def matches(line: str) -> bool:
+                return bool(pattern.search(line))
+        else:
+            needle = query.lower()
+
+            def matches(line: str) -> bool:
+                return needle in line.lower()
+
+        rows: list[dict[str, Any]] = []
+        if hasattr(bv, "find_all_text"):
+            graph_names = {
+                "disasm": "NormalFunctionGraph",
+                "llil": "LowLevelILFunctionGraph",
+                "mlil": "MediumLevelILFunctionGraph",
+                "hlil": "HighLevelILFunctionGraph",
+            }
+            graph_enum = getattr(bn, "FunctionGraphType", None)
+            graph_type = getattr(graph_enum, graph_names[view]) if graph_enum is not None else 0
+            find_flags = getattr(bn, "FindFlag", None)
+            flags = getattr(find_flags, "FindCaseInsensitive") if find_flags is not None else 0
+            terms = [query]
+            if regex:
+                terms = list(dict.fromkeys(re.findall(r"[A-Za-z0-9_:.]{2,}", query)))
+                if not terms:
+                    raise OperationFailure(
+                        "regex_requires_literal",
+                        "Unscoped regex search requires at least one literal term",
+                    )
+            seen: set[tuple[int, str]] = set()
+
+            def record(address: int, _match: str, line: Any) -> bool:
+                nonlocal timed_out
+                if time.monotonic() >= deadline:
+                    timed_out = True
+                    return False
+                text = str(line).strip()
+                marker = (int(address), text)
+                if marker in seen or not matches(text):
+                    return len(rows) < max_results
+                seen.add(marker)
+                function = getattr(line, "function", None)
+                rows.append(
+                    {
+                        "address": hex(int(address)),
+                        "function": str(function.name) if function is not None else None,
+                        "view": view,
+                        "text": text,
+                    }
+                )
+                return len(rows) < max_results
+
+            def progress(_current: int, _total: int) -> bool:
+                nonlocal timed_out
+                if time.monotonic() >= deadline:
+                    timed_out = True
+                    return False
+                return True
+
+            start = int(getattr(bv, "start", 0))
+            end = int(getattr(bv, "end", start))
+            for term in terms:
+                if len(rows) >= max_results:
+                    break
+                if time.monotonic() >= deadline:
+                    timed_out = True
+                    break
+                bv.find_all_text(
+                    start,
+                    end,
+                    term,
+                    flags=flags,
+                    graph_type=graph_type,
+                    progress_func=progress,
+                    match_callback=record,
+                )
+            rows.sort(key=lambda item: (int(item["address"], 16), str(item.get("text", ""))))
+            return self._search_payload(
+                rows,
+                started=started,
+                timed_out=timed_out,
+                max_results=max_results,
+            )
+
+        for func in self._filtered_functions(bv):
+            if time.monotonic() >= deadline:
+                timed_out = True
+                break
+            text = self._disasm_text(bv, func) if view == "disasm" else self._function_text(bv, func, view=view)
+            for line in str(text).splitlines():
+                if not matches(line):
+                    continue
+                rows.append(
+                    {
+                        "address": hex(int(func.start)),
+                        "function": str(func.name),
+                        "view": view,
+                        "text": line.strip(),
+                    }
+                )
+                if len(rows) >= max_results:
+                    return self._search_payload(
+                        rows,
+                        started=started,
+                        timed_out=False,
+                        max_results=max_results,
+                    )
+        return self._search_payload(
+            rows,
+            started=started,
+            timed_out=timed_out,
+            max_results=max_results,
+        )
+
+    def _il_contains_constant(self, value: Any, expected: int, seen: set[int]) -> bool:
+        if isinstance(value, bool) or value is None:
+            return False
+        if isinstance(value, int):
+            return value == expected
+        marker = id(value)
+        if marker in seen:
+            return False
+        seen.add(marker)
+        for attr in ("constant", "value", "offset"):
+            candidate = getattr(value, attr, None)
+            if isinstance(candidate, int) and not isinstance(candidate, bool) and candidate == expected:
+                return True
+        operands = getattr(value, "operands", None)
+        if operands is not None:
+            with contextlib.suppress(Exception):
+                if any(self._il_contains_constant(item, expected, seen) for item in list(operands)):
+                    return True
+        return False
+
+    def _search_constant(
+        self,
+        selector: str | None,
+        value: Any,
+        *,
+        max_results: int,
+        max_seconds: float = 5.0,
+    ) -> dict[str, Any]:
+        if max_results <= 0:
+            raise OperationFailure("invalid_limit", "Search result limit must be positive")
+        if max_seconds <= 0:
+            raise OperationFailure("invalid_timeout", "Search timeout must be positive")
+        started = time.monotonic()
+        deadline = started + max_seconds
+        timed_out = False
+        expected = _parse_address(value)
+        bv = self._resolve_view(selector)
+        rows: list[dict[str, Any]] = []
+        if hasattr(bv, "find_all_text"):
+            graph_enum = getattr(bn, "FunctionGraphType", None)
+            graph_type = getattr(graph_enum, "NormalFunctionGraph") if graph_enum is not None else 0
+            find_flags = getattr(bn, "FindFlag", None)
+            flags = getattr(find_flags, "FindCaseInsensitive") if find_flags is not None else 0
+            seen: set[tuple[int, str]] = set()
+
+            def record(address: int, _match: str, line: Any) -> bool:
+                nonlocal timed_out
+                if time.monotonic() >= deadline:
+                    timed_out = True
+                    return False
+                text = str(line).strip()
+                tokens = list(getattr(getattr(line, "contents", None), "tokens", []) or [])
+                token_match = any(
+                    isinstance(getattr(token, "value", None), int)
+                    and not isinstance(getattr(token, "value", None), bool)
+                    and int(token.value) == expected
+                    for token in tokens
+                )
+                if tokens and not token_match:
+                    return len(rows) < max_results
+                marker = (int(address), text)
+                if marker in seen:
+                    return len(rows) < max_results
+                seen.add(marker)
+                function = getattr(line, "function", None)
+                rows.append(
+                    {
+                        "address": hex(int(address)),
+                        "function": str(function.name) if function is not None else None,
+                        "view": "disasm",
+                        "value": expected,
+                        "text": text,
+                    }
+                )
+                return len(rows) < max_results
+
+            def progress(_current: int, _total: int) -> bool:
+                nonlocal timed_out
+                if time.monotonic() >= deadline:
+                    timed_out = True
+                    return False
+                return True
+
+            start = int(getattr(bv, "start", 0))
+            end = int(getattr(bv, "end", start))
+            for term in dict.fromkeys((hex(expected), str(expected))):
+                if len(rows) >= max_results:
+                    break
+                if time.monotonic() >= deadline:
+                    timed_out = True
+                    break
+                bv.find_all_text(
+                    start,
+                    end,
+                    term,
+                    flags=flags,
+                    graph_type=graph_type,
+                    progress_func=progress,
+                    match_callback=record,
+                )
+            rows.sort(key=lambda item: (int(item["address"], 16), str(item.get("text", ""))))
+            return self._search_payload(
+                rows,
+                started=started,
+                timed_out=timed_out,
+                max_results=max_results,
+            )
+
+        for func in self._filtered_functions(bv):
+            if time.monotonic() >= deadline:
+                timed_out = True
+                break
+            for insn in self._iter_llil_instructions(func):
+                if not self._il_contains_constant(insn, expected, set()):
+                    continue
+                rows.append(
+                    {
+                        "address": hex(int(getattr(insn, "address", func.start))),
+                        "function": str(func.name),
+                        "view": "llil",
+                        "value": expected,
+                        "text": str(insn),
+                    }
+                )
+                if len(rows) >= max_results:
+                    return self._search_payload(
+                        rows,
+                        started=started,
+                        timed_out=False,
+                        max_results=max_results,
+                    )
+        return self._search_payload(
+            rows,
+            started=started,
+            timed_out=timed_out,
+            max_results=max_results,
+        )
 
     def _resolve_type_field(self, bv, field_spec: str):
         type_name, sep, field_name = str(field_spec).rpartition(".")
@@ -1840,14 +2591,41 @@ class BinaryNinjaBridge:
     def _py_exec(self, selector: str | None, script: str):
         bv = self._resolve_view(selector)
         stdout = io.StringIO()
+        helpers = _PythonContext(self, bv)
         scope = {
             "bn": bn,
             "binaryninja": bn,
             "bv": bv,
+            "current_view": bv,
+            "address": helpers.address,
+            "function": helpers.function,
+            "functions_containing": helpers.functions_containing,
+            "read_u8": helpers.read_u8,
+            "read_u16": helpers.read_u16,
+            "read_u32": helpers.read_u32,
+            "read_u64": helpers.read_u64,
+            "read_i8": helpers.read_i8,
+            "read_i16": helpers.read_i16,
+            "read_i32": helpers.read_i32,
+            "read_i64": helpers.read_i64,
+            "read_ptr": helpers.read_ptr,
+            "read_f32": helpers.read_f32,
+            "read_f64": helpers.read_f64,
+            "read_cstr": helpers.read_cstr,
             "result": None,
         }
-        with contextlib.redirect_stdout(stdout):
-            exec(script, scope, scope)
+        try:
+            with contextlib.redirect_stdout(stdout):
+                exec(script, scope, scope)
+        except Exception as exc:
+            raise OperationFailure(
+                "python_error",
+                f"Python execution failed: {type(exc).__name__}: {exc}",
+                observed={
+                    "stdout": stdout.getvalue(),
+                    "traceback": traceback.format_exc(),
+                },
+            ) from exc
         result_value, warnings = self._normalize_py_result(scope.get("result"))
         result = {
             "stdout": stdout.getvalue(),
@@ -2808,6 +3586,7 @@ _bridge: BinaryNinjaBridge | None = None
 
 
 def _start_bridge_command(_):  # pragma: no cover - GUI runtime
+    _stop_bridge()
     start_bridge()
 
 

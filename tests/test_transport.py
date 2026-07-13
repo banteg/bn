@@ -36,6 +36,23 @@ class _Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     daemon_threads = True
 
 
+class _ErrorHandler(socketserver.StreamRequestHandler):
+    def handle(self):
+        self.rfile.readline()
+        self.wfile.write(
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": {
+                        "code": "function_not_found",
+                        "message": "Function not found: plaeyr_update",
+                        "observed": {"suggestions": ["player_update"]},
+                    },
+                }
+            ).encode("utf-8")
+        )
+
+
 def test_send_request_uses_registry_and_socket(tmp_path, monkeypatch):
     monkeypatch.setenv("BN_CACHE_DIR", str(tmp_path))
     pid = os.getpid()
@@ -68,6 +85,34 @@ def test_send_request_uses_registry_and_socket(tmp_path, monkeypatch):
         response = send_request("ping", params={"hello": "world"}, target=f"{pid}:1:999")
         assert response["result"]["op"] == "ping"
         assert response["result"]["params"] == {"hello": "world"}
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_send_request_preserves_structured_bridge_errors(tmp_path, monkeypatch):
+    from bn.transport import BridgeError, BridgeInstance, _send_request_to_instance
+
+    socket_path = Path("/tmp") / f"bn-test-error-{os.getpid()}-{uuid.uuid4().hex[:8]}.sock"
+    server = _Server(str(socket_path), _ErrorHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    instance = BridgeInstance(
+        pid=os.getpid(),
+        socket_path=socket_path,
+        registry_path=tmp_path / "bridge.json",
+        plugin_name="bn_agent_bridge",
+        plugin_version="0.1.0",
+        started_at=None,
+        meta={},
+    )
+
+    try:
+        with pytest.raises(BridgeError) as exc_info:
+            _send_request_to_instance(instance, "function_info")
+        assert exc_info.value.code == "function_not_found"
+        assert exc_info.value.details["observed"]["suggestions"] == ["player_update"]
+        assert "Suggestions: player_update" in str(exc_info.value)
     finally:
         server.shutdown()
         server.server_close()

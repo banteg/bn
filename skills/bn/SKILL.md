@@ -22,6 +22,7 @@ Use `bn doctor` when bridge state is unclear or `bn target list` does not show w
 - If there is exactly one open BinaryView, target-scoped commands can omit `--target` entirely.
 - If multiple targets are open, commands that omit `--target` fail; pass `--target <selector>` from `bn target list`.
 - Use `--target active` only when you explicitly mean the GUI-selected target.
+- `--target` can appear anywhere in the command. Set `BN_TARGET` when a whole shell session should use one database.
 
 3. Pick the right output mode:
 - Read commands default to `text`.
@@ -29,6 +30,8 @@ Use `bn doctor` when bridge state is unclear or `bn target list` does not show w
 - Other options: `--format json`, `--format ndjson`, `--out <path>`.
 
 Outputs above `10_000` `o200k_base` tokens auto-spill to disk. When that happens, stdout is empty and stderr carries the spill metadata as plain text, so do not chain `bn ... | rg ...` and expect to search the real output. Use `--out <path>` when you want the full body written to a known file.
+
+Use `--match <regex>` with `--before`/`--after` to keep relevant text lines before spill accounting. Use `--no-spill` when a downstream command must receive the complete stdout stream.
 
 ## High-Value Read Commands
 
@@ -40,6 +43,7 @@ bn function list --min-address 0x401000 --max-address 0x40ffff
 bn function search attachment
 bn function search --regex 'attach|detach|follow'
 bn function info sample_track_floor_height_at_position
+bn function containing 0x401234
 bn callsites crt_rand --within bonus_pick_random_type
 bn callsites crt_rand --within-file /tmp/rng-functions.txt --format ndjson
 bn proto get sample_track_floor_height_at_position
@@ -47,7 +51,11 @@ bn local list sample_track_floor_height_at_position
 bn decompile sample_track_floor_height_at_position
 bn il sample_track_floor_height_at_position
 bn disasm sample_track_floor_height_at_position
+bn disasm 0x401234 --before 5 --after 10
+bn address info global_player+0x308
+bn data read global_player+0x308 --type u32 --count 4
 bn xrefs sample_track_floor_height_at_position
+bn refs sample_track_floor_height_at_position
 bn xrefs field TrackRowCell.tile_type
 bn comment get --address 0x401000
 bn types --query Player
@@ -55,9 +63,15 @@ bn types show Player
 bn struct show Player
 bn strings --query follow
 bn imports
+bn search text crt_rand --view hlil --max-results 50
+bn search constant 0x370 --max-results 50
 ```
 
 `bn function search` is case-insensitive substring matching by default. Add `--regex` when you need regular expressions. `bn function list` and `bn function search` both accept `--min-address` and `--max-address`.
+
+Function-read commands accept either a function identifier or any address contained by that function. Address commands also resolve data/import symbols and `symbol+offset` expressions.
+
+Searches have a five-second default time budget and report whether results are complete. Increase `--timeout` deliberately instead of leaving an unbounded whole-database IL scan running.
 
 ## Caller-Static Mapping
 
@@ -76,7 +90,10 @@ Use it like this:
 bn callsites crt_rand --within bonus_pick_random_type --caller-static
 bn callsites crt_rand --within fx_queue_add_random --caller-static
 bn callsites crt_rand --within-file /tmp/rng-functions.txt --format json
+bn callsites crt_rand --format ndjson
 ```
+
+Omit the scope when you want Binary Ninja's inbound reference index to derive all caller functions. Add `--within` or `--within-file` when you already know the relevant callers and want the fastest narrow result.
 
 The `--within-file` format is one function identifier per non-empty line. Lines beginning with `#` are ignored.
 
@@ -134,9 +151,15 @@ print("\n".join(f"{addr:#x} {name}" for addr, name in out))
 PY
 ```
 
-The `py exec` environment includes:`bn`, `binaryninja`, `bv`, `result`.
+The `py exec` environment includes the unrestricted `bn`/`binaryninja` module and `bv`, plus `current_view`, `address`, `function`, `functions_containing`, typed `read_u*`/`read_i*` helpers, `read_ptr`, `read_f32`, `read_f64`, `read_cstr`, and `result`. These are small functions, not a wrapper API.
 
-`py exec` always returns `stdout` and `result`. If `result` is not JSON-serializable, the CLI returns `repr(result)` plus a warning instead of silently flattening it.
+`py exec` is a first-class lane for arbitrary-complexity analysis, not a deprecated fallback. It always returns `stdout` and `result`. If `result` is not JSON-serializable, the CLI returns `repr(result)` plus a warning instead of silently flattening it. Failures include the Binary Ninja-process traceback.
+
+## Machine Discovery And Batch Input
+
+Use `bn schema --format json` to discover commands, arguments, defaults, choices, and `BN_TARGET` support without a live bridge.
+
+`bn batch apply` accepts a manifest file, a JSON operation array, or NDJSON operations on stdin. Keep preview/live verification semantics; batch is primarily the transaction lane, while ordinary inspection should use read commands or `py exec`.
 
 ## Mutation Workflow
 

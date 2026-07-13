@@ -5,7 +5,7 @@
 ## Headline Features
 
 - Query live Binary Ninja state from the shell: targets, functions, callsites, decompile text, IL, disassembly, xrefs, types, strings, imports, and reusable bundles.
-- Execute Python inside the Binary Ninja process instead of maintaining a separate headless workflow.
+- Execute unrestricted Python inside the Binary Ninja process, with stable helpers for common reads and symbol/function resolution.
 - Apply mutations with `--preview`, capture decompile diffs, and verify the live post-state before reporting success.
 - Emit structured `json` or `ndjson` output, auto-spill large results to files, and return token counts so agents can budget context intelligently.
 
@@ -35,7 +35,7 @@ bn skill install
 
 That symlinks [`skills/bn`](/Users/banteg/dev/banteg/bn/skills/bn) into `$CODEX_HOME/skills/bn` by default. Use `--mode copy` if you want a standalone copy instead. Restart Codex to pick up a new or renamed skill.
 
-If the plugin code changes, reload Binary Ninja Python plugins or restart Binary Ninja.
+Use `BN Agent Bridge\\Restart Bridge` from Binary Ninja's command palette to restart the socket bridge. After plugin code or version changes, reload Python plugins or restart Binary Ninja so Python imports the new module code.
 
 ## How It Works
 
@@ -83,6 +83,14 @@ In normal use, prefer the `selector` field. For a single open database, this is 
 bn decompile update_player_movement_flags --target SnailMail_unwrapped.exe.bndb
 ```
 
+`--target` may appear anywhere in the command, including before the top-level command, and `BN_TARGET` provides a shell-wide default:
+
+```bash
+bn --target SnailMail_unwrapped.exe.bndb decompile update_player_movement_flags
+bn function --target SnailMail_unwrapped.exe.bndb search attachment
+export BN_TARGET=SnailMail_unwrapped.exe.bndb
+```
+
 Omitting `--target` only works when exactly one target is open. If multiple targets are open, the CLI rejects the command instead of silently falling back to `active`.
 
 ## Output Behavior
@@ -93,6 +101,8 @@ Every command supports:
 - `--format text`
 - `--format ndjson`
 - `--out <path>`
+- `--match <regex>` with `--before` and `--after` text context
+- `--no-spill` to stream a complete result to stdout
 
 Interactive read commands default to `text`. Mutation, setup, and export commands default to `json`.
 Add `--format json` when you need stable fields for automation or piping into structured tooling.
@@ -107,6 +117,8 @@ bn decompile sample_track_floor_height_at_position --out /tmp/floor.json
 ```
 
 If `--out` is set, the command writes the rendered result to that path and prints a compact JSON envelope with the artifact path, byte size, token count, tokenizer, hash, and summary. Agents can use that envelope to decide whether to read the full artifact, keep a summary, or defer loading it into context.
+
+Use `--match` when an agent only needs a few lines from otherwise large text output. Use `--no-spill` when a downstream process must consume stdout directly and is prepared for the full result.
 
 The only exception is `bn bundle function`, which writes the bundle artifact from inside the bridge and prints the envelope back to the CLI.
 
@@ -125,7 +137,9 @@ bn function list --min-address 0x401000 --max-address 0x40ffff
 bn function search attachment
 bn function search --regex 'attach|detach|follow'
 bn function info end_track_attachment_follow_state
+bn function containing 0x401234
 bn callsites crt_rand --within bonus_pick_random_type
+bn callsites crt_rand
 bn callsites crt_rand --within-file /tmp/rng-functions.txt --format ndjson
 bn proto get end_track_attachment_follow_state
 bn local list end_track_attachment_follow_state
@@ -134,7 +148,12 @@ bn refresh
 bn decompile end_track_attachment_follow_state
 bn il end_track_attachment_follow_state
 bn disasm end_track_attachment_follow_state
+bn disasm 0x401234 --before 5 --after 10
+bn address info global_player+0x308
+bn data read global_player+0x308 --type u32 --count 4
 bn xrefs end_track_attachment_follow_state
+bn xrefs global_player+0x308
+bn refs end_track_attachment_follow_state
 bn xrefs field TrackRowCell.tile_type
 bn comment get --address 0x401000
 
@@ -144,11 +163,18 @@ bn struct show Player
 bn types declare --file /path/to/win32_min.h --preview
 bn strings --query follow
 bn imports
+bn search text 'crt_rand' --view hlil --max-results 50
+bn search constant 0x370 --max-results 50
+bn schema --format json --out /tmp/bn-schema.json
 ```
 
 `bn function search` stays case-insensitive substring matching by default. Add `--regex` when you need regular expressions. `bn function list` and `bn function search` both accept `--min-address` and `--max-address` to filter by function start address.
 
-`bn callsites` is the direct-call lane for exact return-address recovery. It reports both the native `call_addr` and the post-call `caller_static`, where `caller_static = call_addr + instruction_length`. Scope it with `--within <function>` or `--within-file <path>`; the file format is one function identifier per non-empty line, with `#` comments ignored.
+`bn callsites` is the direct-call lane for exact return-address recovery. It reports both the native `call_addr` and the post-call `caller_static`, where `caller_static = call_addr + instruction_length`. Without a scope it derives caller functions from Binary Ninja's inbound code-reference index. Use `--within <function>` or `--within-file <path>` to narrow the work; the file format is one function identifier per non-empty line, with `#` comments ignored.
+
+Read commands that take a function also accept an address inside that function. Address-bearing commands resolve numeric addresses, function names, data/import symbols, and `symbol+offset` expressions.
+
+Whole-database searches stop after five seconds by default and return partial-result metadata when the time or result limit is reached. Raise the budget explicitly with `--timeout <seconds>` when a slower IL view is intentional.
 
 Each callsite row also includes:
 
@@ -202,9 +228,27 @@ The `py exec` environment includes:
 - `bn`
 - `binaryninja`
 - `bv`
+- `current_view` (an alias for `bv`)
+- `address`, `function`, and `functions_containing`
+- `read_u8`, `read_u16`, `read_u32`, `read_u64`
+- `read_i8`, `read_i16`, `read_i32`, `read_i64`
+- `read_ptr`, `read_f32`, `read_f64`, and `read_cstr`
 - `result`
 
-Stdout and `result` are both returned. If `result` is not JSON-serializable, `bn` returns `repr(result)` and includes a warning instead of silently stringifying the whole response.
+These small functions cover common API-shape mistakes without introducing a wrapper API or restricting the full Binary Ninja module or view object. Stdout and `result` are both returned. If `result` is not JSON-serializable, `bn` returns `repr(result)` and includes a warning instead of silently stringifying the whole response. Python failures include the in-process traceback and any stdout produced before the exception.
+
+## Agent Protocol
+
+`bn schema --format json` emits the protocol version plus the complete global and per-command argument surface without contacting Binary Ninja. `bn doctor --format json` reports the live plugin's supported operations and feature flags. Bridge failures use structured error codes and details in JSON/NDJSON mode, while text mode includes concise suggestions.
+
+Batch input can be a traditional manifest object, a JSON operation array, or one operation per NDJSON line:
+
+```bash
+bn batch apply --target active --preview --stdin <<'JSON'
+{"op":"set_comment","address":"0x401000","comment":"entry"}
+{"op":"delete_comment","address":"0x401010"}
+JSON
+```
 
 ## Mutation Commands
 

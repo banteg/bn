@@ -33,6 +33,40 @@ def test_function_list_uses_implicit_target_when_single_target_is_open(monkeypat
     assert '"name"' not in output
 
 
+def test_target_option_is_accepted_between_command_levels(monkeypatch, capsys):
+    captured = {}
+
+    def fake_send_request(op, *, params=None, target=None, timeout=30.0):
+        captured.update(op=op, params=params, target=target)
+        return {"ok": True, "result": []}
+
+    monkeypatch.setattr(bn.cli, "send_request", fake_send_request)
+
+    rc = bn.cli.main(["function", "--target", "active", "list"])
+
+    assert rc == 0
+    assert captured["op"] == "list_functions"
+    assert captured["target"] == "active"
+    assert capsys.readouterr().out == "none\n"
+
+
+def test_bn_target_environment_default(monkeypatch, capsys):
+    captured = {}
+
+    def fake_send_request(op, *, params=None, target=None, timeout=30.0):
+        captured.update(op=op, target=target)
+        return {"ok": True, "result": []}
+
+    monkeypatch.setenv("BN_TARGET", "env-target")
+    monkeypatch.setattr(bn.cli, "send_request", fake_send_request)
+
+    rc = bn.cli.main(["function", "list"])
+
+    assert rc == 0
+    assert captured == {"op": "list_functions", "target": "env-target"}
+    assert capsys.readouterr().out == "none\n"
+
+
 def test_function_list_requires_target_when_multiple_targets_are_open(monkeypatch, capsys):
     def fake_send_request(op, *, params=None, target=None, timeout=30.0):
         if op == "list_targets":
@@ -140,6 +174,47 @@ def test_function_list_warns_when_output_auto_spills(monkeypatch, capsys):
     assert "lines: 2" in stderr
 
 
+def test_no_spill_streams_complete_output(monkeypatch, capsys):
+    captured = {}
+
+    def fake_send_request(op, *, params=None, target=None, timeout=30.0):
+        return {"ok": True, "result": [{"name": "sub_401000", "address": "0x401000"}]}
+
+    def fake_write_output_result(value, **kwargs):
+        captured.update(kwargs)
+        return types.SimpleNamespace(rendered=value + "\n", spilled=False, artifact=None)
+
+    monkeypatch.setattr(bn.cli, "send_request", fake_send_request)
+    monkeypatch.setattr(bn.cli, "write_output_result", fake_write_output_result)
+
+    rc = bn.cli.main(["function", "list", "--target", "active", "--no-spill"])
+
+    assert rc == 0
+    assert captured["allow_spill"] is False
+    assert capsys.readouterr().out == "0x401000  sub_401000\n"
+
+
+def test_match_filters_text_with_context(monkeypatch, capsys):
+    def fake_send_request(op, *, params=None, target=None, timeout=30.0):
+        return {
+            "ok": True,
+            "result": [
+                {"name": "sub_401000", "address": "0x401000"},
+                {"name": "sub_402000", "address": "0x402000"},
+                {"name": "sub_403000", "address": "0x403000"},
+            ],
+        }
+
+    monkeypatch.setattr(bn.cli, "send_request", fake_send_request)
+
+    rc = bn.cli.main(
+        ["function", "list", "--target", "active", "--match", "402000", "--before", "1"]
+    )
+
+    assert rc == 0
+    assert capsys.readouterr().out == "0x401000  sub_401000\n0x402000  sub_402000\n"
+
+
 def test_function_list_forwards_address_filters(monkeypatch, capsys):
     captured = {}
 
@@ -219,11 +294,10 @@ def test_function_commands_do_not_accept_paging_flags():
         parser.parse_args(["function", "search", "--offset", "10", "attach"])
 
 
-def test_callsites_requires_exactly_one_scope_flag():
+def test_callsites_scope_is_optional_but_mutually_exclusive():
     parser = bn.cli.build_parser()
 
-    with pytest.raises(SystemExit):
-        parser.parse_args(["callsites", "crt_rand"])
+    assert parser.parse_args(["callsites", "crt_rand"]).within is None
 
     with pytest.raises(SystemExit):
         parser.parse_args(
@@ -769,6 +843,60 @@ def test_py_exec_accepts_inline_code(monkeypatch):
     assert "out_path" not in captured["params"]
 
 
+def test_callsites_without_scope_requests_automatic_discovery(monkeypatch, capsys):
+    captured = {}
+
+    def fake_send_request(op, *, params=None, target=None, timeout=30.0):
+        captured.update(op=op, params=params, target=target)
+        return {"ok": True, "result": []}
+
+    monkeypatch.setattr(bn.cli, "send_request", fake_send_request)
+
+    rc = bn.cli.main(["callsites", "crt_rand", "--target", "active"])
+
+    assert rc == 0
+    assert captured["op"] == "callsites"
+    assert captured["params"]["within_identifiers"] == []
+    assert capsys.readouterr().out == "none\n"
+
+
+def test_batch_apply_accepts_ndjson_from_stdin(monkeypatch, capsys):
+    captured = {}
+
+    def fake_send_request(op, *, params=None, target=None, timeout=30.0):
+        captured.update(op=op, params=params, target=target)
+        return {"ok": True, "result": {"success": True, "results": []}}
+
+    monkeypatch.setattr(bn.cli, "send_request", fake_send_request)
+    monkeypatch.setattr(
+        bn.cli.sys,
+        "stdin",
+        __import__("io").StringIO('{"op":"set_comment","address":"0x1","comment":"a"}\n{"op":"delete_comment","address":"0x2"}\n'),
+    )
+
+    rc = bn.cli.main(["batch", "apply", "--stdin", "--target", "active"])
+
+    assert rc == 0
+    assert captured["op"] == "batch_apply"
+    assert [item["op"] for item in captured["params"]["ops"]] == ["set_comment", "delete_comment"]
+    assert captured["target"] == "active"
+    assert json.loads(capsys.readouterr().out)["success"] is True
+
+
+def test_schema_is_machine_readable_without_a_bridge(tmp_path, capsys):
+    path = tmp_path / "schema.json"
+    rc = bn.cli.main(["schema", "--format", "json", "--out", str(path)])
+
+    assert rc == 0
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["ok"] is True
+    schema = json.loads(path.read_text())
+    assert schema["protocol_version"] == 1
+    assert any("--target" in item.get("options", []) for item in schema["global_arguments"])
+    assert "py exec" in schema["commands"]
+    assert "data read" in schema["commands"]
+
+
 def test_py_exec_missing_script_mentions_code(capsys):
     rc = bn.cli.main(["py", "exec", "--target", "active", "--script", "missing.py"])
 
@@ -916,8 +1044,7 @@ def test_bundle_function_out_path_is_bridge_owned(monkeypatch, tmp_path, capsys)
 def test_removed_experimental_commands_are_not_present():
     parser = bn.cli.build_parser()
 
-    with pytest.raises(SystemExit):
-        parser.parse_args(["data"])
+    assert parser.parse_args(["data", "read", "0x401000"]).handler is bn.cli._data_read
     with pytest.raises(SystemExit):
         parser.parse_args(["bundle", "corpus"])
     with pytest.raises(SystemExit):
@@ -954,7 +1081,7 @@ def test_help_full_prints_recursive_root_help(capsys):
 
     assert exc_info.value.code == 0
     stdout, stderr = capsys.readouterr()
-    assert "usage: bn\n" in stdout
+    assert "usage: bn [--version] [--target GLOBAL_TARGET]" in stdout
     assert "usage: bn struct {show,field} ..." in stdout
     assert "usage: bn struct field set" in stdout
     assert "-h, --help" not in stdout

@@ -14,7 +14,16 @@ from .paths import bridge_registry_path
 
 
 class BridgeError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = details or {}
 
 
 TRANSIENT_SOCKET_ERRNOS = {
@@ -171,6 +180,18 @@ def _send_request_to_instance(
         return response
 
     error = response.get("error") or "Unknown Binary Ninja bridge error"
+    if isinstance(error, dict):
+        message = str(error.get("message") or error.get("code") or "Unknown Binary Ninja bridge error")
+        observed = error.get("observed")
+        if isinstance(observed, dict) and observed.get("traceback"):
+            message += "\n" + str(observed["traceback"]).rstrip()
+        if isinstance(observed, dict) and observed.get("suggestions"):
+            message += "\nSuggestions: " + ", ".join(str(item) for item in observed["suggestions"])
+        raise BridgeError(
+            message,
+            code=str(error.get("code")) if error.get("code") is not None else None,
+            details=error,
+        )
     raise BridgeError(str(error))
 
 

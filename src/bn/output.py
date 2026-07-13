@@ -101,6 +101,7 @@ def write_output_result(
     out_path: Path | None,
     stem: str,
     spill_token_limit: int = DEFAULT_SPILL_TOKEN_LIMIT,
+    allow_spill: bool = True,
 ) -> OutputWriteResult:
     rendered = render_value(value, fmt)
     encoded = rendered.encode("utf-8")
@@ -122,7 +123,7 @@ def write_output_result(
             spilled=False,
         )
 
-    if token_count <= spill_token_limit:
+    if not allow_spill or token_count <= spill_token_limit:
         return OutputWriteResult(rendered=rendered)
 
     suffix = ".ndjson" if fmt == "ndjson" else ".txt" if fmt == "text" else ".json"
@@ -149,6 +150,7 @@ def write_output(
     out_path: Path | None,
     stem: str,
     spill_token_limit: int = DEFAULT_SPILL_TOKEN_LIMIT,
+    allow_spill: bool = True,
 ) -> str:
     return write_output_result(
         value,
@@ -156,4 +158,5 @@ def write_output(
         out_path=out_path,
         stem=stem,
         spill_token_limit=spill_token_limit,
+        allow_spill=allow_spill,
     ).rendered
