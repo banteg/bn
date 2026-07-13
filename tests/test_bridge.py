@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib
 import importlib.util
 import sys
@@ -429,6 +430,26 @@ def test_doctor_advertises_protocol_capabilities(monkeypatch):
     assert "batch_apply" not in result["capabilities"]["operations"]
     assert set(result["capabilities"]["operations"]) == set(instance._operation_handlers())
     assert result["capabilities"]["structured_errors"] is True
+
+
+def test_cli_only_calls_registered_bridge_operations(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+    cli_path = Path(__file__).resolve().parents[1] / "src/bn/cli.py"
+    tree = ast.parse(cli_path.read_text(encoding="utf-8"))
+    cli_operations = {
+        node.args[1].value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_call"
+        and len(node.args) > 1
+        and isinstance(node.args[1], ast.Constant)
+        and isinstance(node.args[1].value, str)
+    }
+
+    assert cli_operations
+    assert cli_operations <= set(instance._operation_handlers())
 
 
 def test_dispatch_rejects_protocol_mismatch(monkeypatch):
