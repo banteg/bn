@@ -344,3 +344,15 @@ Run the CLI from the repo without installing it globally:
 ```bash
 uv run bn --help
 ```
+
+Verify that package, plugin, and lockfile versions agree:
+
+```bash
+uv run python scripts/release.py --check
+```
+
+For a release, update every version field with one command before editing the changelog and creating the tag:
+
+```bash
+uv run python scripts/release.py 0.14.0
+```

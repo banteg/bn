@@ -10,10 +10,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 - Added GitHub Actions CI for Python 3.14 with locked dependency sync, the full test suite, and distribution builds.
 - Added a CI status badge to the README.
+- Added a release helper and CI check that keep the package, plugin, and lockfile versions synchronized.
+
+### Changed
+
+- Centralized bridge operation dispatch so executable handlers also define the advertised protocol capabilities.
+- Moved target discovery, socket serving, and Python execution helpers into focused bridge modules.
+- Simplified mutations to one operation per request and serialized Binary Ninja access with one reentrant mutex.
+- Unified bundle artifact writing with the CLI's standard output, hashing, token, and summary envelope.
 
 ### Fixed
 
 - Made the transient socket retry test portable across macOS and Linux errno values.
+- Included the companion Binary Ninja plugin and Codex skill in built wheels and source distributions.
+- Enforced protocol and ambiguous-target checks in the bridge without a CLI preflight request.
 
 ## [0.13.1] - 2026-07-14
 
