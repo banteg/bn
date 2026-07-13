@@ -54,7 +54,15 @@ def _load_bridge(monkeypatch):
     monkeypatch.delitem(sys.modules, module_name, raising=False)
     monkeypatch.delitem(sys.modules, package_name, raising=False)
 
-    bridge_path = Path(__file__).resolve().parents[1] / "plugin" / "bn_agent_bridge" / "bridge.py"
+    bridge_path = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "bn"
+        / "assets"
+        / "plugin"
+        / "bn_agent_bridge"
+        / "bridge.py"
+    )
     package = types.ModuleType(package_name)
     package.__path__ = [str(bridge_path.parent)]
     monkeypatch.setitem(sys.modules, package_name, package)

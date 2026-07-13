@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import platform
 import tempfile
+from importlib.resources import files
 from pathlib import Path
 
 
@@ -10,8 +11,8 @@ PLUGIN_NAME = "bn_agent_bridge"
 SKILL_NAME = "bn"
 
 
-def repo_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+def _asset_path(*parts: str) -> Path:
+    return Path(str(files("bn").joinpath("assets", *parts)))
 
 
 def codex_home() -> Path:
@@ -55,7 +56,7 @@ def spill_root() -> Path:
 
 
 def plugin_source_dir() -> Path:
-    return repo_root() / "plugin" / PLUGIN_NAME
+    return _asset_path("plugin", PLUGIN_NAME)
 
 
 def binary_ninja_plugin_dir() -> Path:
@@ -83,7 +84,7 @@ def codex_skills_dir() -> Path:
 
 
 def skill_source_dir() -> Path:
-    return repo_root() / "skills" / SKILL_NAME
+    return _asset_path("skills", SKILL_NAME)
 
 
 def skill_install_dir() -> Path:

@@ -38,3 +38,8 @@ jobs:
 
       - name: Build distributions
         run: uv build
+
+      - name: Smoke-test packaged assets
+        run: |
+          uv run --isolated --no-project --with dist/*.whl bn plugin install --dest "${RUNNER_TEMP}/bn-plugin" --mode copy
+          uv run --isolated --no-project --with dist/*.whl bn skill install --dest "${RUNNER_TEMP}/bn-skill" --mode copy

@@ -29,7 +29,7 @@ Install the Binary Ninja companion plugin:
 bn plugin install
 ```
 
-That links [`plugin/bn_agent_bridge`](/Users/banteg/dev/banteg/bn/plugin/bn_agent_bridge) into your Binary Ninja plugins directory.
+That links the packaged `bn_agent_bridge` companion into your Binary Ninja plugins directory.
 
 Install the bundled Codex skill:
 
@@ -37,7 +37,7 @@ Install the bundled Codex skill:
 bn skill install
 ```
 
-That symlinks [`skills/bn`](/Users/banteg/dev/banteg/bn/skills/bn) into `$CODEX_HOME/skills/bn` by default. Use `--mode copy` if you want a standalone copy instead. Restart Codex to pick up a new or renamed skill.
+That symlinks the packaged `bn` skill into `$CODEX_HOME/skills/bn` by default. Use `--mode copy` if you want a standalone copy instead. Restart Codex to pick up a new or renamed skill.
 
 Use `BN Agent Bridge\\Restart Bridge` from Binary Ninja's command palette to restart the socket bridge. After plugin code or version changes, reload Python plugins or restart Binary Ninja so Python imports the new module code.
 

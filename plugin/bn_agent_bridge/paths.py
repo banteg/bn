@@ -1,1 +1,0 @@
-../../src/bn/paths.py
