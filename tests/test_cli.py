@@ -860,29 +860,6 @@ def test_callsites_without_scope_requests_automatic_discovery(monkeypatch, capsy
     assert capsys.readouterr().out == "none\n"
 
 
-def test_batch_apply_accepts_ndjson_from_stdin(monkeypatch, capsys):
-    captured = {}
-
-    def fake_send_request(op, *, params=None, target=None, timeout=30.0):
-        captured.update(op=op, params=params, target=target)
-        return {"ok": True, "result": {"success": True, "results": []}}
-
-    monkeypatch.setattr(bn.cli, "send_request", fake_send_request)
-    monkeypatch.setattr(
-        bn.cli.sys,
-        "stdin",
-        __import__("io").StringIO('{"op":"set_comment","address":"0x1","comment":"a"}\n{"op":"delete_comment","address":"0x2"}\n'),
-    )
-
-    rc = bn.cli.main(["batch", "apply", "--stdin", "--target", "active"])
-
-    assert rc == 0
-    assert captured["op"] == "batch_apply"
-    assert [item["op"] for item in captured["params"]["ops"]] == ["set_comment", "delete_comment"]
-    assert captured["target"] == "active"
-    assert json.loads(capsys.readouterr().out)["success"] is True
-
-
 def test_schema_is_machine_readable_without_a_bridge(tmp_path, capsys):
     path = tmp_path / "schema.json"
     rc = bn.cli.main(["schema", "--format", "json", "--out", str(path)])
@@ -895,6 +872,7 @@ def test_schema_is_machine_readable_without_a_bridge(tmp_path, capsys):
     assert any("--target" in item.get("options", []) for item in schema["global_arguments"])
     assert "py exec" in schema["commands"]
     assert "data read" in schema["commands"]
+    assert "batch" not in schema["commands"]
 
 
 def test_py_exec_missing_script_mentions_code(capsys):
@@ -1051,6 +1029,8 @@ def test_removed_experimental_commands_are_not_present():
         parser.parse_args(["struct", "replace"])
     with pytest.raises(SystemExit):
         parser.parse_args(["patch", "bytes"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["batch", "apply", "manifest.json"])
 
 
 def test_missing_subcommand_prints_exact_help(capsys):

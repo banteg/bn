@@ -319,7 +319,7 @@ def test_verify_rename_symbol_reports_noop(monkeypatch):
     assert result["observed"]["name"] == "player_update"
 
 
-def test_mutation_reverts_on_verification_failure(monkeypatch):
+def test_multi_operation_mutation_reverts_atomically_on_verification_failure(monkeypatch):
     bridge = _load_bridge(monkeypatch)
     instance = bridge.BinaryNinjaBridge()
     bv = _FakeMutationBV()
@@ -336,7 +336,7 @@ def test_mutation_reverts_on_verification_failure(monkeypatch):
         lambda bv, op: {
             "op": "rename_symbol",
             "kind": "function",
-            "address": "0x401000",
+            "address": op["address"],
             "new_name": "player_update",
             "requested": {"identifier": "sub_401000", "new_name": "player_update"},
         },
@@ -346,15 +346,27 @@ def test_mutation_reverts_on_verification_failure(monkeypatch):
         "_verify_operation",
         lambda bv, result: {
             **result,
-            "status": "verification_failed",
-            "message": "Live rename verification failed at 0x401000",
+            "status": "verified" if result["address"] == "0x401000" else "verification_failed",
+            "message": (
+                "Live rename verified at 0x401000"
+                if result["address"] == "0x401000"
+                else "Live rename verification failed at 0x401010"
+            ),
         },
     )
 
-    result = instance._mutation("active", False, [{"op": "rename_symbol"}])
+    result = instance._mutation(
+        "active",
+        False,
+        [
+            {"op": "rename_symbol", "address": "0x401000"},
+            {"op": "rename_symbol", "address": "0x401010"},
+        ],
+    )
 
     assert result["success"] is False
     assert result["committed"] is False
+    assert [item["status"] for item in result["results"]] == ["verified", "verification_failed"]
     assert ("revert", "state") in bv.events
     assert ("commit", "state") not in bv.events
 
@@ -394,6 +406,7 @@ def test_doctor_advertises_protocol_capabilities(monkeypatch):
 
     assert result["protocol_version"] == 1
     assert "py_exec" in result["capabilities"]["operations"]
+    assert "batch_apply" not in result["capabilities"]["operations"]
     assert result["capabilities"]["structured_errors"] is True
 
 

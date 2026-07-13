@@ -241,15 +241,6 @@ These small functions cover common API-shape mistakes without introducing a wrap
 
 `bn schema --format json` emits the protocol version plus the complete global and per-command argument surface without contacting Binary Ninja. `bn doctor --format json` reports the live plugin's supported operations and feature flags. Bridge failures use structured error codes and details in JSON/NDJSON mode, while text mode includes concise suggestions.
 
-Batch input can be a traditional manifest object, a JSON operation array, or one operation per NDJSON line:
-
-```bash
-bn batch apply --target active --preview --stdin <<'JSON'
-{"op":"set_comment","address":"0x401000","comment":"entry"}
-{"op":"delete_comment","address":"0x401010"}
-JSON
-```
-
 ## Mutation Commands
 
 Mutations follow the same target-selection rules as other target-specific commands.
@@ -271,7 +262,7 @@ bn struct field set Player 0x308 movement_flag_selector uint32_t --preview
 
 Preview mode applies the change, refreshes analysis, captures affected decompile diffs, and then reverts the mutation.
 
-Non-preview writes only report success after reading the live BN session back and verifying that the requested post-state actually landed. If verification fails, the CLI returns a nonzero exit code and reverts the whole mutation or batch.
+Non-preview writes only report success after reading the live BN session back and verifying that the requested post-state actually landed. If verification fails, the CLI returns a nonzero exit code and reverts the mutation.
 
 After any live type or prototype mutation, do an explicit readback:
 
@@ -299,39 +290,7 @@ When verification fails, JSON output also includes `requested` and `observed` st
 
 If a declaration only parses functions or extern variables and introduces no named types to persist, `types declare` returns a verified no-op instead of failing with `No named types found in declaration`.
 
-`bn local list` and `bn function info` return stable `local_id` values for parameters and locals. Prefer those IDs for `bn local rename`, `bn local retype`, and batch manifests; legacy name-based targeting still works for compatibility.
-
-## Batch Manifests
-
-`bn batch apply` accepts a JSON manifest:
-
-```json
-{
-  "target": "SnailMail_unwrapped.exe.bndb",
-  "preview": true,
-  "ops": [
-    {
-      "op": "rename_symbol",
-      "kind": "function",
-      "identifier": "sub_401000",
-      "new_name": "player_update"
-    },
-    {
-      "op": "set_prototype",
-      "identifier": "player_update",
-      "prototype": "int __cdecl player_update(Player* self)"
-    }
-  ]
-}
-```
-
-Apply it with:
-
-```bash
-bn batch apply manifest.json
-```
-
-Batch apply verifies the live session by default. If any op fails to apply or fails post-state verification, the entire batch is reverted.
+`bn local list` and `bn function info` return stable `local_id` values for parameters and locals. Prefer those IDs for `bn local rename` and `bn local retype`; legacy name-based targeting still works for compatibility.
 
 ## Troubleshooting
 

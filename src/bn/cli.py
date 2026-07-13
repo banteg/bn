@@ -1780,45 +1780,6 @@ def _struct_field_delete(args: argparse.Namespace) -> int:
     )
 
 
-def _batch_apply(args: argparse.Namespace) -> int:
-    if args.stdin and args.manifest is not None:
-        raise BridgeError("Pass either a manifest path or --stdin, not both")
-    if args.manifest is None and not args.stdin:
-        raise BridgeError("batch apply requires a manifest path or --stdin")
-    if args.stdin or str(args.manifest) == "-":
-        source = sys.stdin.read()
-        source_name = "stdin"
-    else:
-        if not args.manifest.exists():
-            raise BridgeError(f"Batch manifest not found: {args.manifest}")
-        source = args.manifest.read_text(encoding="utf-8")
-        source_name = str(args.manifest)
-    try:
-        payload = json.loads(source)
-    except json.JSONDecodeError:
-        try:
-            payload = [json.loads(line) for line in source.splitlines() if line.strip()]
-        except json.JSONDecodeError as exc:
-            raise BridgeError(f"Invalid JSON batch input from {source_name}: {exc}") from exc
-    if isinstance(payload, list):
-        manifest = {"ops": payload}
-    elif isinstance(payload, dict):
-        manifest = dict(payload)
-    else:
-        raise BridgeError("Batch input must be a JSON object, an operation array, or NDJSON operations")
-    if args.preview:
-        manifest["preview"] = True
-    return _call(
-        args,
-        "batch_apply",
-        manifest,
-        require_target=False,
-        text_renderer=_render_mutation_text,
-        stem="batch-apply",
-        result_exit_code=_mutation_exit_code,
-    )
-
-
 def _add_paged_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--limit", type=int, default=100)
@@ -2251,15 +2212,6 @@ def build_parser() -> argparse.ArgumentParser:
     field_delete.add_argument("struct_name")
     field_delete.add_argument("field_name")
     field_delete.set_defaults(handler=_struct_field_delete)
-    batch = subparsers.add_parser("batch", help="Apply a batch manifest")
-    batch_sub = batch.add_subparsers(dest="batch_command")
-    batch_apply = batch_sub.add_parser("apply", help="Apply a JSON manifest")
-    _common_io_options(batch_apply, default_format="json")
-    batch_apply.add_argument("--preview", action="store_true")
-    batch_apply.add_argument("--stdin", action="store_true", help="Read a manifest, operation array, or NDJSON from stdin")
-    batch_apply.add_argument("manifest", type=Path, nargs="?")
-    batch_apply.set_defaults(handler=_batch_apply)
-
     return parser
 
 

@@ -200,7 +200,6 @@ WRITE_LOCKED_OPS = {
     "struct_field_rename",
     "struct_field_delete",
     "types_declare",
-    "batch_apply",
     "refresh",
 }
 
@@ -745,13 +744,6 @@ class BinaryNinjaBridge:
             return self._mutation(target, bool(params.get("preview")), [{"op": "struct_field_delete", **params}])
         if op == "types_declare":
             return self._mutation(target, bool(params.get("preview")), [{"op": "types_declare", **params}])
-        if op == "batch_apply":
-            manifest = dict(params)
-            preview = bool(manifest.get("preview"))
-            target = str(manifest.get("target") or target)
-            operations = list(manifest.get("ops") or [])
-            return self._mutation(target, preview, operations)
-
         raise ValueError(f"Unknown operation: {op}")
 
     def _doctor(self):
@@ -3262,7 +3254,7 @@ class BinaryNinjaBridge:
                 return self._op_struct_field_delete(bv, op)
             if kind == "types_declare":
                 return self._op_types_declare(bv, op)
-            raise OperationFailure("unsupported", f"Unsupported batch operation: {kind}", requested=self._operation_requested(op))
+            raise OperationFailure("unsupported", f"Unsupported mutation operation: {kind}", requested=self._operation_requested(op))
         except OperationFailure:
             raise
         except Exception as exc:
@@ -3274,7 +3266,7 @@ class BinaryNinjaBridge:
 
     def _mutation(self, selector: str | None, preview: bool, operations: list[dict[str, Any]]):
         if not operations:
-            raise ValueError("Batch operation list is empty")
+            raise ValueError("Mutation operation list is empty")
 
         bv = self._resolve_view(selector)
         affected = self._guess_affected_functions(bv, operations)

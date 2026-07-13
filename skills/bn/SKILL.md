@@ -155,11 +155,9 @@ The `py exec` environment includes the unrestricted `bn`/`binaryninja` module an
 
 `py exec` is a first-class lane for arbitrary-complexity analysis, not a deprecated fallback. It always returns `stdout` and `result`. If `result` is not JSON-serializable, the CLI returns `repr(result)` plus a warning instead of silently flattening it. Failures include the Binary Ninja-process traceback.
 
-## Machine Discovery And Batch Input
+## Machine Discovery
 
 Use `bn schema --format json` to discover commands, arguments, defaults, choices, and `BN_TARGET` support without a live bridge.
-
-`bn batch apply` accepts a manifest file, a JSON operation array, or NDJSON operations on stdin. Keep preview/live verification semantics; batch is primarily the transaction lane, while ordinary inspection should use read commands or `py exec`.
 
 ## Mutation Workflow
 
@@ -187,7 +185,7 @@ If a struct edit is already identical, preview may report `changed: false` with 
 
 If a declaration only introduces functions or extern variables and no named types, `types declare` now reports a no-op instead of failing with `No named types found in declaration`.
 
-Non-preview writes are live-verified by default. If the requested state does not read back from Binary Ninja, the command exits nonzero and the whole mutation or batch is reverted.
+Non-preview writes are live-verified by default. If the requested state does not read back from Binary Ninja, the command exits nonzero and the mutation is reverted.
 
 After any live type or prototype mutation, do an explicit readback:
 
