@@ -15,7 +15,39 @@ concurrency:
 
 jobs:
   test:
-    name: Python 3.14
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.12"
+          - "3.14"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@v8.3.2
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Sync locked dependencies
+        run: uv sync --locked --all-groups
+
+      - name: Check release metadata
+        run: uv run python scripts/release.py --check
+
+      - name: Run tests
+        run: uv run pytest
+
+  package:
+    name: Package smoke test
+    needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -36,13 +68,19 @@ jobs:
       - name: Check release metadata
         run: uv run python scripts/release.py --check
 
-      - name: Run tests
-        run: uv run pytest
-
       - name: Build distributions
-        run: uv build
+        run: uv build --no-sources
+
+      - name: Install wheel as a uv tool
+        env:
+          UV_TOOL_BIN_DIR: ${{ runner.temp }}/bin
+          UV_TOOL_DIR: ${{ runner.temp }}/tools
+        run: uv tool install dist/*.whl
 
       - name: Smoke-test packaged assets
+        env:
+          BN: ${{ runner.temp }}/bin/bn
         run: |
-          uv run --isolated --no-project --with dist/*.whl bn plugin install --dest "${RUNNER_TEMP}/bn-plugin" --mode copy
-          uv run --isolated --no-project --with dist/*.whl bn skill install --dest "${RUNNER_TEMP}/bn-skill" --mode copy
+          "${BN}" --version
+          "${BN}" plugin install --dest "${RUNNER_TEMP}/bn-plugin" --mode copy
+          "${BN}" skill install --dest "${RUNNER_TEMP}/bn-skill" --mode copy

@@ -6,14 +6,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-07-14
+
 ### Added
 
-- Added GitHub Actions CI for Python 3.14 with locked dependency sync, the full test suite, and distribution builds.
-- Added a CI status badge to the README.
+- Added GitHub Actions CI for Python 3.12 and 3.14 with locked dependency sync, the full test suite, and distribution builds.
 - Added a release helper and CI check that keep the package, plugin, and lockfile versions synchronized.
+- Added a tag-triggered Trusted Publishing workflow that publishes CI-built artifacts to PyPI and attaches the same files to a GitHub release.
 
 ### Changed
 
+- Renamed the PyPI distribution to `bn-cli`; the installed executable and Python module remain `bn`.
+- Lowered the supported Python requirement from 3.14 to 3.12.
 - Centralized bridge operation dispatch so executable handlers also define the advertised protocol capabilities.
 - Moved target discovery, socket serving, and Python execution helpers into focused bridge modules.
 - Simplified mutations to one operation per request and serialized Binary Ninja access with one reentrant mutex.
@@ -198,7 +202,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 - Simplified bridge discovery, trusted registered bridge sockets, resolved active targets consistently, and removed legacy debug paths.
 
-[Unreleased]: https://github.com/banteg/bn/compare/v0.13.1...HEAD
+[Unreleased]: https://github.com/banteg/bn/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/banteg/bn/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/banteg/bn/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/banteg/bn/compare/v0.12.2...v0.13.0
 [0.12.2]: https://github.com/banteg/bn/compare/v0.12.1...v0.12.2

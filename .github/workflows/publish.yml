@@ -1,0 +1,149 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions: {}
+
+jobs:
+  test:
+    name: Test on Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.12"
+          - "3.14"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@v8.3.2
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Sync locked dependencies
+        run: uv sync --locked --all-groups
+
+      - name: Check release metadata and tag
+        run: uv run python scripts/release.py --check --tag "${GITHUB_REF_NAME}"
+
+      - name: Run tests
+        run: uv run pytest
+
+  build:
+    name: Build distributions
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@v8.3.2
+        with:
+          python-version: "3.14"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Build distributions
+        run: uv build --no-sources
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-distributions
+          path: dist/
+          if-no-files-found: error
+
+  verify:
+    name: Verify wheel installation
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+
+    steps:
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@v8.3.2
+        with:
+          python-version: "3.12"
+
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-distributions
+          path: dist/
+
+      - name: Install wheel as a uv tool
+        env:
+          UV_TOOL_BIN_DIR: ${{ runner.temp }}/bin
+          UV_TOOL_DIR: ${{ runner.temp }}/tools
+        run: uv tool install dist/*.whl
+
+      - name: Smoke-test packaged assets
+        env:
+          BN: ${{ runner.temp }}/bin/bn
+        run: |
+          "${BN}" --version
+          "${BN}" plugin install --dest "${RUNNER_TEMP}/bn-plugin" --mode copy
+          "${BN}" skill install --dest "${RUNNER_TEMP}/bn-skill" --mode copy
+
+  publish:
+    name: Publish to PyPI
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/p/bn-cli
+    permissions:
+      actions: read
+      id-token: write
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-distributions
+          path: dist/
+
+      - name: Publish distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  release:
+    name: Create GitHub release
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-distributions
+          path: dist/
+
+      - name: Create GitHub release
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/* --verify-tag --generate-notes --title "${GITHUB_REF_NAME}"

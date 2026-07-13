@@ -1,7 +1,5 @@
 # bn
 
-[![CI](https://github.com/banteg/bn/actions/workflows/ci.yml/badge.svg)](https://github.com/banteg/bn/actions/workflows/ci.yml)
-
 `bn` is a coding agent-first CLI for Binary Ninja. It gives a shell session or tool-calling agent stable commands, structured output, and access to the same live Binary Ninja database you already have open in the GUI.
 
 See the [changelog](CHANGELOG.md) for release notes by version and date.
@@ -20,7 +18,7 @@ Recommended setup: install the CLI, the Binary Ninja companion plugin, and the b
 Install the CLI on your PATH:
 
 ```bash
-uv tool install -e .
+uv tool install bn-cli
 ```
 
 Install the Binary Ninja companion plugin:
@@ -38,6 +36,8 @@ bn skill install
 ```
 
 That symlinks the packaged `bn` skill into `$CODEX_HOME/skills/bn` by default. Use `--mode copy` if you want a standalone copy instead. Restart Codex to pick up a new or renamed skill.
+
+Upgrade later with `uv tool upgrade bn-cli`.
 
 Use `BN Agent Bridge\\Restart Bridge` from Binary Ninja's command palette to restart the socket bridge. After plugin code or version changes, reload Python plugins or restart Binary Ninja so Python imports the new module code.
 
@@ -345,6 +345,12 @@ Run the CLI from the repo without installing it globally:
 uv run bn --help
 ```
 
+Install an editable development build as a uv tool with:
+
+```bash
+uv tool install -e .
+```
+
 Verify that package, plugin, and lockfile versions agree:
 
 ```bash
@@ -356,3 +362,5 @@ For a release, update every version field with one command before editing the ch
 ```bash
 uv run python scripts/release.py 0.14.0
 ```
+
+Pushing the matching `v0.14.0` tag runs the publish workflow, which tests, builds, publishes the distributions to PyPI through Trusted Publishing, and creates the GitHub release from the same artifacts.

@@ -1,15 +1,20 @@
 [project]
-name = "bn"
-version = "0.13.1"
+name = "bn-cli"
+version = "0.14.0"
 description = "Agent-friendly Binary Ninja CLI with a GUI companion bridge"
 readme = "README.md"
 authors = [
     { name = "banteg", email = "4562643+banteg@users.noreply.github.com" }
 ]
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 dependencies = [
     "tiktoken>=0.12.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/banteg/bn"
+Issues = "https://github.com/banteg/bn/issues"
+Changelog = "https://github.com/banteg/bn/blob/master/CHANGELOG.md"
 
 [project.scripts]
 bn = "bn.cli:main"
@@ -20,8 +25,11 @@ dev = [
 ]
 
 [build-system]
-requires = ["uv_build>=0.9.18,<0.10.0"]
+requires = ["uv_build>=0.11.21,<0.12.0"]
 build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "bn"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -5,6 +5,7 @@ import json
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 from bn.paths import plugin_source_dir, skill_source_dir
@@ -32,7 +33,13 @@ def test_packaged_skill_assets_are_complete():
 def test_release_metadata_is_in_sync():
     root = Path(__file__).resolve().parents[1]
     result = subprocess.run(
-        [sys.executable, str(root / "scripts/release.py"), "--check"],
+        [
+            sys.executable,
+            str(root / "scripts/release.py"),
+            "--check",
+            "--tag",
+            f"v{VERSION}",
+        ],
         cwd=root,
         capture_output=True,
         text=True,
@@ -41,6 +48,14 @@ def test_release_metadata_is_in_sync():
 
     assert result.returncode == 0, result.stderr
     assert f"release metadata: {VERSION}" in result.stdout
+
+
+def test_distribution_metadata_matches_public_install_name():
+    root = Path(__file__).resolve().parents[1]
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+
+    assert project["name"] == "bn-cli"
+    assert project["requires-python"] == ">=3.12"
 
 
 def test_cli_and_plugin_protocol_versions_match():
@@ -95,4 +110,4 @@ def test_release_script_updates_all_metadata(tmp_path):
         (tmp_path / "src/bn/assets/plugin/bn_agent_bridge/plugin.json").read_text(encoding="utf-8")
     )
     assert plugin["version"] == "1.2.3"
-    assert 'name = "bn"\nversion = "1.2.3"' in (tmp_path / "uv.lock").read_text(encoding="utf-8")
+    assert 'name = "bn-cli"\nversion = "1.2.3"' in (tmp_path / "uv.lock").read_text(encoding="utf-8")

@@ -5,6 +5,7 @@ import argparse
 import json
 import re
 import sys
+import tomllib
 from pathlib import Path
 
 
@@ -21,6 +22,7 @@ def _replace_once(path: Path, pattern: str, replacement: str) -> None:
 
 def versions(root: Path) -> dict[str, str]:
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
+    project_name = str(tomllib.loads(pyproject)["project"]["name"])
     package_version = (root / "src/bn/version.py").read_text(encoding="utf-8")
     plugin = json.loads(
         (root / "src/bn/assets/plugin/bn_agent_bridge/plugin.json").read_text(encoding="utf-8")
@@ -30,7 +32,10 @@ def versions(root: Path) -> dict[str, str]:
     patterns = {
         "pyproject.toml": (pyproject, r'^version = "([^"]+)"'),
         "src/bn/version.py": (package_version, r'^VERSION = "([^"]+)"'),
-        "uv.lock": (lock, r'^\[\[package\]\]\nname = "bn"\nversion = "([^"]+)"'),
+        "uv.lock": (
+            lock,
+            rf'^\[\[package\]\]\nname = "{re.escape(project_name)}"\nversion = "([^"]+)"',
+        ),
     }
     result = {name: re.search(pattern, source, re.MULTILINE).group(1) for name, (source, pattern) in patterns.items()}
     result["plugin.json"] = str(plugin["version"])
@@ -46,15 +51,23 @@ def check(root: Path) -> str:
     return unique.pop()
 
 
+def check_tag(version: str, tag: str) -> None:
+    expected = f"v{version}"
+    if tag != expected:
+        raise RuntimeError(f"Release tag is {tag}, expected {expected}")
+
+
 def set_version(root: Path, version: str) -> None:
     if VERSION_PATTERN.fullmatch(version) is None:
         raise ValueError(f"Invalid version: {version}")
 
-    _replace_once(root / "pyproject.toml", r'^version = "[^"]+"', f'version = "{version}"')
+    pyproject_path = root / "pyproject.toml"
+    project_name = str(tomllib.loads(pyproject_path.read_text(encoding="utf-8"))["project"]["name"])
+    _replace_once(pyproject_path, r'^version = "[^"]+"', f'version = "{version}"')
     _replace_once(root / "src/bn/version.py", r'^VERSION = "[^"]+"', f'VERSION = "{version}"')
     _replace_once(
         root / "uv.lock",
-        r'^(\[\[package\]\]\nname = "bn"\nversion = ")[^"]+("$)',
+        rf'^(\[\[package\]\]\nname = "{re.escape(project_name)}"\nversion = ")[^"]+("$)',
         rf'\g<1>{version}\2',
     )
 
@@ -68,6 +81,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Update or verify bn release metadata")
     parser.add_argument("version", nargs="?", help="Version to write, for example 0.14.0")
     parser.add_argument("--check", action="store_true", help="Only verify that release metadata agrees")
+    parser.add_argument("--tag", help="Also require an exact v<version> release tag")
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1], help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
@@ -76,10 +90,14 @@ def main(argv: list[str] | None = None) -> int:
             if args.version is not None:
                 parser.error("version cannot be combined with --check")
             version = check(args.root)
+            if args.tag is not None:
+                check_tag(version, args.tag)
             print(f"release metadata: {version}")
             return 0
         if args.version is None:
             parser.error("provide a version or use --check")
+        if args.tag is not None:
+            parser.error("--tag can only be combined with --check")
         set_version(args.root, args.version)
         version = check(args.root)
         print(f"updated release metadata to {version}")
