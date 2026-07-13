@@ -1,5 +1,7 @@
 # bn
 
+[![CI](https://github.com/banteg/bn/actions/workflows/ci.yml/badge.svg)](https://github.com/banteg/bn/actions/workflows/ci.yml)
+
 `bn` is a coding agent-first CLI for Binary Ninja. It gives a shell session or tool-calling agent stable commands, structured output, and access to the same live Binary Ninja database you already have open in the GUI.
 
 ## Headline Features
