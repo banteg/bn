@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-07-14
+
+### Added
+
+- Added an MIT license and included it in the package metadata and distribution artifacts.
+
 ## [0.14.0] - 2026-07-14
 
 ### Added
@@ -202,7 +208,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 - Simplified bridge discovery, trusted registered bridge sockets, resolved active targets consistently, and removed legacy debug paths.
 
-[Unreleased]: https://github.com/banteg/bn/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/banteg/bn/compare/v0.14.1...HEAD
+[0.14.1]: https://github.com/banteg/bn/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/banteg/bn/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/banteg/bn/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/banteg/bn/compare/v0.12.2...v0.13.0

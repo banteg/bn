@@ -56,6 +56,9 @@ def test_distribution_metadata_matches_public_install_name():
 
     assert project["name"] == "bn-cli"
     assert project["requires-python"] == ">=3.12"
+    assert project["license"] == "MIT"
+    assert project["license-files"] == ["LICENSE"]
+    assert (root / "LICENSE").is_file()
 
 
 def test_cli_and_plugin_protocol_versions_match():

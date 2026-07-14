@@ -1,8 +1,10 @@
 [project]
 name = "bn-cli"
-version = "0.14.0"
+version = "0.14.1"
 description = "Agent-friendly Binary Ninja CLI with a GUI companion bridge"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "banteg", email = "4562643+banteg@users.noreply.github.com" }
 ]
