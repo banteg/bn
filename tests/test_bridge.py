@@ -253,6 +253,14 @@ class _FakeBV:
         return b"\x90" * length
 
 
+class _FakeLittleEndian:
+    name = "LittleEndian"
+    value = 0
+
+    def __str__(self) -> str:
+        return "0"
+
+
 class _FakeType:
     def __init__(
         self,
@@ -852,7 +860,7 @@ def test_data_read_decodes_typed_values(monkeypatch):
     bridge = _load_bridge(monkeypatch)
     instance = bridge.BinaryNinjaBridge()
     bv = _FakeBV()
-    bv.endianness = "LittleEndian"
+    bv.endianness = _FakeLittleEndian()
     bv.address_size = 8
     bv.read = lambda address, length: b"\x78\x56\x34\x12"[:length]
     monkeypatch.setattr(instance, "_resolve_view", lambda selector: bv)
@@ -1002,17 +1010,21 @@ def test_py_exec_exposes_stable_helpers_and_full_view(monkeypatch):
     instance = bridge.BinaryNinjaBridge()
     fn = _FakeFunction(0x401000, "player_update")
     bv = _FakeBV(functions=[fn])
-    bv.endianness = "LittleEndian"
+    bv.endianness = _FakeLittleEndian()
+    bv.address_size = 4
+    bv.read = lambda address, length: b"\x78\x56\x34\x12"[:length]
     bv.get_functions_containing = lambda address: [fn]
     monkeypatch.setattr(instance, "_resolve_view", lambda selector: bv)
 
     result = instance._py_exec(
         "active",
-        "result = {'value': read_u32(0x401000), 'same': current_view is bv, 'name': function(0x401020).name}",
+        "result = {'value': read_u32(0x401000), 'pointer': read_ptr(0x401000), "
+        "'same': current_view is bv, 'name': function(0x401020).name}",
     )
 
     assert result["result"] == {
-        "value": 0x90909090,
+        "value": 0x12345678,
+        "pointer": 0x12345678,
         "same": True,
         "name": "player_update",
     }

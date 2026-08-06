@@ -9,6 +9,25 @@ from typing import Any
 from .errors import OperationFailure
 
 
+def byte_order_for_view(bv: Any) -> str:
+    endianness = getattr(bv, "endianness", None)
+    if endianness is None:
+        return "little"
+
+    label = str(getattr(endianness, "name", endianness)).casefold()
+    if "little" in label:
+        return "little"
+    if "big" in label:
+        return "big"
+
+    value = getattr(endianness, "value", None)
+    if value == 0:
+        return "little"
+    if value == 1:
+        return "big"
+    raise RuntimeError(f"Unsupported Binary Ninja endianness: {endianness!r}")
+
+
 class _PythonHelpers:
     """Stable convenience helpers layered over the complete Binary Ninja API."""
 
@@ -18,7 +37,7 @@ class _PythonHelpers:
 
     @property
     def byte_order(self) -> str:
-        return "little" if "little" in str(getattr(self.bv, "endianness", "little")).lower() else "big"
+        return byte_order_for_view(self.bv)
 
     def address(self, identifier: Any) -> int:
         return self.bridge._resolve_address(self.bv, identifier)

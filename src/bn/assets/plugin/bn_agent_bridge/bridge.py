@@ -18,7 +18,7 @@ from binaryninja.plugin import PluginCommand
 
 from .errors import OperationFailure
 from .paths import PLUGIN_NAME, bridge_registry_path, bridge_socket_path
-from .python_exec import execute_python
+from .python_exec import byte_order_for_view, execute_python
 from .server import BridgeHandler, ThreadedUnixServer
 from .targets import TargetManager, ui
 from .version import PROTOCOL_VERSION, VERSION, build_id_for_file
@@ -538,7 +538,7 @@ class BinaryNinjaBridge:
         if count <= 0 or count > 1_000_000:
             raise OperationFailure("invalid_count", "Data read count must be between 1 and 1000000")
 
-        byte_order = "little" if "little" in str(getattr(bv, "endianness", "little")).lower() else "big"
+        byte_order = byte_order_for_view(bv)
         if value_type == "bytes":
             data = bytes(bv.read(address, count))
             return {
