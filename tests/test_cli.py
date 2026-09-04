@@ -1340,3 +1340,14 @@ def test_invalid_output_options_never_send_mutation(monkeypatch, capsys):
                     ["--format", "text", "--match", "["],
                     ["--before", "2"]):
         assert bn.cli.main(["symbol", "rename", "old", "new", *options]) == 2
+
+
+def test_disasm_match_context_and_linear_extent(monkeypatch, capsys):
+    calls = []
+    def send(op, **kwargs):
+        calls.append(kwargs["params"])
+        return {"result": {"text": "first\nneedle\nlast"}}
+    monkeypatch.setattr(bn.cli, "send_request", send)
+    assert bn.cli.main(["disasm", "0x1000", "--count", "3", "--match", "needle", "--before", "1"]) == 0
+    assert calls == [{"identifier": "0x1000", "before": None, "after": None, "count": 3, "end": None}]
+    assert capsys.readouterr().out.strip() == "first\nneedle"

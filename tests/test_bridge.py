@@ -1577,3 +1577,31 @@ def test_multi_bundle_deduplicates_and_preserves_partial_results(monkeypatch):
     assert calls == [("fixed", "a"), ("fixed", "missing"), ("fixed", "b")]
     assert [r["ok"] for r in result["functions"]] == [True, False, True]
     assert result["success"] is False
+
+
+@pytest.mark.parametrize("extent", [{"count": 3}, {"end": "0x1003"}])
+def test_linear_disassembly_without_functions(monkeypatch, extent):
+    module = _load_bridge(monkeypatch)
+    instance = module.BinaryNinjaBridge()
+    arch = types.SimpleNamespace(max_instr_length=4, get_instruction_text=lambda data, addr: (["nop"], 1))
+    view = types.SimpleNamespace(arch=arch, read=lambda addr, size: b"\x90" * min(size, max(0, 0x1003 - addr)))
+    monkeypatch.setattr(instance, "_resolve_view", lambda _: view)
+    monkeypatch.setattr(instance, "_find_function", lambda *a, **k: pytest.fail("must not need functions"))
+    result = instance._disasm(None, "0x1000", **extent)
+    assert result["complete"]
+    assert len(result["instructions"]) == 3
+    assert result["next_address"] == "0x1003"
+    result = instance._disasm(None, "0x1000", count=4)
+    assert not result["complete"]
+    assert result["stopped_reason"] == "unmapped"
+
+
+def test_linear_disassembly_does_not_cross_exclusive_end(monkeypatch):
+    module = _load_bridge(monkeypatch)
+    instance = module.BinaryNinjaBridge()
+    arch = types.SimpleNamespace(max_instr_length=4, get_instruction_text=lambda data, addr: (["two bytes"], 2))
+    view = types.SimpleNamespace(arch=arch, read=lambda addr, size: b"x" * size)
+    monkeypatch.setattr(instance, "_resolve_view", lambda _: view)
+    result = instance._disasm(None, "0x1000", end="0x1001")
+    assert result["instructions"] == []
+    assert result["stopped_reason"] == "undecodable"

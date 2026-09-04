@@ -183,6 +183,8 @@ class BinaryNinjaBridge:
                 params["identifier"],
                 before=params.get("before"),
                 after=params.get("after"),
+                count=params.get("count"),
+                end=params.get("end"),
             ),
             "xrefs": lambda params, target: self._xrefs(target, params["identifier"]),
             "refs_from": lambda params, target: self._refs_from(target, params["identifier"]),
@@ -1489,8 +1491,14 @@ class BinaryNinjaBridge:
         *,
         before: Any = None,
         after: Any = None,
+        count: Any = None,
+        end: Any = None,
     ):
         bv = self._resolve_view(selector)
+        if count is not None or end is not None:
+            if before is not None or after is not None:
+                raise OperationFailure("invalid_range", "Linear disassembly cannot be combined with instruction windows")
+            return self._linear_disasm(bv, identifier, count=count, end=end)
         func = self._find_function(bv, identifier, allow_containing=True)
         if before is None and after is None:
             text = self._disasm_text(bv, func)
@@ -1529,6 +1537,43 @@ class BinaryNinjaBridge:
             "function": {"name": func.name, "address": hex(func.start)},
             "text": text,
         }
+
+    def _linear_disasm(self, bv, identifier, *, count=None, end=None):
+        address = start = self._resolve_address(bv, identifier)
+        if (count is None) == (end is None):
+            raise OperationFailure("invalid_range", "Provide either --count or --end")
+        count = int(count) if count is not None else None
+        end = self._resolve_address(bv, end) if end is not None else None
+        if count is not None and count <= 0 or end is not None and end <= start:
+            raise OperationFailure("invalid_range", "Count must be positive and end must be after start")
+        entries = []
+        stopped = None
+        while (count is None or len(entries) < count) and (end is None or address < end):
+            arch = bv.get_arch_at(address) if hasattr(bv, "get_arch_at") else bv.arch
+            if arch is None:
+                stopped = "unmapped"
+                break
+            size = int(arch.max_instr_length)
+            data = bytes(bv.read(address, min(size, end - address) if end is not None else size))
+            if not data:
+                stopped = "unmapped"
+                break
+            decoded = arch.get_instruction_text(data, address)
+            if decoded is None:
+                stopped = "undecodable"
+                break
+            tokens, length = decoded
+            if not length or length > len(data):
+                stopped = "undecodable"
+                break
+            entries.append({"address": hex(address), "bytes": data[:length].hex(" "),
+                            "text": "".join(str(token) for token in tokens), "length": length})
+            address += length
+        lines = [f"{int(row['address'], 16):08x}  {row['bytes']:<16} {row['text']}" for row in entries]
+        if stopped:
+            lines.append(f"Stopped at {address:#x}: {stopped}")
+        return {"address": hex(start), "next_address": hex(address), "instructions": entries,
+                "complete": stopped is None, "stopped_reason": stopped, "text": "\n".join(lines)}
 
     def _xrefs(self, selector: str | None, identifier):
         bv = self._resolve_view(selector)

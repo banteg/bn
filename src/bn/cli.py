@@ -313,7 +313,7 @@ def _validate_output_args(args: argparse.Namespace) -> None:
             re.compile(match)
         except re.error as exc:
             raise BridgeError(f"Invalid --match regex: {exc}") from exc
-    elif before or after:
+    elif (before or after) and getattr(args, "handler", None) is not _disasm:
         raise BridgeError("--before and --after require --match")
     if before < 0 or after < 0:
         raise BridgeError("Match context must be non-negative")
@@ -1249,17 +1249,23 @@ def _il(args: argparse.Namespace) -> int:
 
 
 def _disasm(args: argparse.Namespace) -> int:
-    return _call(
-        args,
-        "disasm",
-        {
-            "identifier": args.identifier,
-            "before": args.before_instructions,
-            "after": args.after_instructions,
-        },
-        text_renderer=_text_field("text"),
-        stem="disasm",
-    )
+    before, after = args.before_instructions, args.after_instructions
+    # Preserve legacy numeric windows unless --match explicitly requests text context.
+    if args.match is not None:
+        if before is not None or after is not None:
+            raise BridgeError("Use --before/--after for match context or omit --match for instruction windows")
+    else:
+        before = args.match_before if args.match_before else before
+        after = args.match_after if args.match_after else after
+        args.match_before = args.match_after = 0
+    params = {"identifier": args.identifier, "before": before, "after": after}
+    if args.count is not None or args.end is not None:
+        if before is not None or after is not None:
+            raise BridgeError("Linear disassembly cannot be combined with instruction windows")
+        if args.count is not None and args.count <= 0:
+            raise BridgeError("--count must be positive")
+        params.update(count=args.count, end=args.end)
+    return _call(args, "disasm", params, text_renderer=_text_field("text"), stem="disasm")
 
 
 def _address_info(args: argparse.Namespace) -> int:
@@ -1859,21 +1865,24 @@ def build_parser() -> argparse.ArgumentParser:
     il.set_defaults(handler=_il)
 
     disasm = subparsers.add_parser("disasm", help="Disassemble a function")
-    _common_io_options(disasm, match_context=False)
+    _common_io_options(disasm)
     _target_option(disasm, required=False)
     disasm.add_argument("identifier")
     disasm.add_argument(
-        "--before",
+        "--before-instructions",
         dest="before_instructions",
         type=int,
         help="Instructions before an address identifier (requires an address)",
     )
     disasm.add_argument(
-        "--after",
+        "--after-instructions",
         dest="after_instructions",
         type=int,
         help="Instructions after an address identifier (requires an address)",
     )
+    extent = disasm.add_mutually_exclusive_group()
+    extent.add_argument("--count", type=int, help="Decode this many instructions linearly from an address")
+    extent.add_argument("--end", help="Decode linearly up to this exclusive address")
     disasm.set_defaults(handler=_disasm)
 
     address = subparsers.add_parser("address", help="Inspect arbitrary addresses")
