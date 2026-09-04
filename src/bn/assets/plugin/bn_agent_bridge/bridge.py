@@ -2745,20 +2745,6 @@ class BinaryNinjaBridge:
         state = bv.begin_undo_actions()
         try:
             result = self._apply_operation(bv, operation)
-        except OperationFailure as exc:
-            with contextlib.suppress(Exception):
-                bv.revert_undo_actions(state)
-            return {
-                "preview": preview,
-                "success": False,
-                "committed": False,
-                "message": "Rolled back before post-state verification because an operation failed to apply.",
-                "results": [self._operation_failure_result(operation, exc)],
-                "affected_functions": [],
-                "affected_types": [],
-            }
-
-        try:
             bv.update_analysis_and_wait()
             after = self._capture_function_snapshots(bv, affected)
             type_after = self._capture_type_snapshots(bv, operation)
@@ -2789,6 +2775,18 @@ class BinaryNinjaBridge:
                 "results": [annotated_result],
                 "affected_functions": diffs,
                 "affected_types": type_diffs,
+            }
+        except OperationFailure as exc:
+            with contextlib.suppress(Exception):
+                bv.revert_undo_actions(state)
+            return {
+                "preview": preview,
+                "success": False,
+                "committed": False,
+                "message": "Rolled back because the operation failed.",
+                "results": [self._operation_failure_result(operation, exc)],
+                "affected_functions": [],
+                "affected_types": [],
             }
         except Exception:
             with contextlib.suppress(Exception):

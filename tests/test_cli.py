@@ -1329,3 +1329,13 @@ def test_decompile_text_format_unwraps_text_field(monkeypatch, capsys):
 
     assert rc == 0
     assert capsys.readouterr().out == "return 7;\n"
+
+
+def test_invalid_output_options_never_send_mutation(monkeypatch, capsys):
+    def unexpected(*args, **kwargs):
+        raise AssertionError("must validate before sending")
+    monkeypatch.setattr(bn.cli, "send_request", unexpected)
+    for options in (["--format", "json", "--match", "x"],
+                    ["--format", "text", "--match", "["],
+                    ["--before", "2"]):
+        assert bn.cli.main(["symbol", "rename", "old", "new", *options]) == 2

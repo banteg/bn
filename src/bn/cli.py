@@ -291,6 +291,23 @@ def _mutation_exit_code(result: Any) -> int:
     return 0
 
 
+def _validate_output_args(args: argparse.Namespace) -> None:
+    match = getattr(args, "match", None)
+    before = getattr(args, "match_before", 0)
+    after = getattr(args, "match_after", 0)
+    if match is not None:
+        if args.format != "text":
+            raise BridgeError("--match is only valid with --format text")
+        try:
+            re.compile(match)
+        except re.error as exc:
+            raise BridgeError(f"Invalid --match regex: {exc}") from exc
+    elif before or after:
+        raise BridgeError("--before and --after require --match")
+    if before < 0 or after < 0:
+        raise BridgeError("Match context must be non-negative")
+
+
 def _call(
     args: argparse.Namespace,
     op: str,
@@ -303,6 +320,7 @@ def _call(
     stem: str,
     result_exit_code: Callable[[Any], int] | None = None,
 ) -> int:
+    _validate_output_args(args)
     request_params = dict(params or {})
     effective_page_limit = None
     if page_limit is not None and page_limit >= 0:
@@ -2146,6 +2164,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
+        _validate_output_args(args)
         return handler(args)
     except BridgeError as exc:
         if getattr(args, "format", "text") in {"json", "ndjson"} and exc.details:

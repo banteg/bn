@@ -1523,3 +1523,25 @@ def test_collect_open_views_uses_tabs_api(monkeypatch):
 
     assert len(views) == 3
     assert set(id(view) for view in views) == {id(view_a), id(view_b), id(view_c)}
+
+
+@pytest.mark.parametrize("preview", [True, False])
+def test_mutation_reverts_unexpected_apply_error(monkeypatch, preview):
+    module = _load_bridge(monkeypatch)
+    instance = module.BinaryNinjaBridge()
+    calls = []
+    view = types.SimpleNamespace(
+        begin_undo_actions=lambda: "undo",
+        revert_undo_actions=lambda state: calls.append(("revert", state)),
+    )
+    monkeypatch.setattr(instance, "_resolve_view", lambda _: view)
+    monkeypatch.setattr(instance, "_guess_affected_functions", lambda *a: [])
+    monkeypatch.setattr(instance, "_capture_function_snapshots", lambda *a: {})
+    monkeypatch.setattr(instance, "_capture_type_snapshots", lambda *a: {})
+    def fail(*a):
+        calls.append(("write", None))
+        raise RuntimeError("API failed after write")
+    monkeypatch.setattr(instance, "_apply_operation", fail)
+    with pytest.raises(RuntimeError, match="API failed"):
+        instance._mutation(None, preview, {"op": "rename_symbol"})
+    assert calls == [("write", None), ("revert", "undo")]
