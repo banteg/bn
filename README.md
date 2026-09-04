@@ -1,366 +1,126 @@
 # bn
 
-`bn` is a coding agent-first CLI for Binary Ninja. It gives a shell session or tool-calling agent stable commands, structured output, and access to the same live Binary Ninja database you already have open in the GUI.
-
-See the [changelog](CHANGELOG.md) for release notes by version and date.
-
-## Headline Features
-
-- Query live Binary Ninja state from the shell: targets, functions, callsites, decompile text, IL, disassembly, xrefs, types, strings, imports, and reusable bundles.
-- Execute unrestricted Python inside the Binary Ninja process, with stable helpers for common reads and symbol/function resolution.
-- Apply mutations with `--preview`, capture decompile diffs, and verify the live post-state before reporting success.
-- Emit structured `json` or `ndjson` output, auto-spill large results to files, and return token counts so agents can budget context intelligently.
+An agent-friendly CLI for the Binary Ninja database already open in your GUI. Read decompilation, assembly, references, and types; run unrestricted in-process Python; apply mutations with preview and live verification. The GUI companion works with a personal license and requires no headless license.
 
 ## Install
 
-Recommended setup: install the CLI, the Binary Ninja companion plugin, and the bundled Codex skill.
-
-Install the CLI on your PATH:
-
 ```bash
 uv tool install bn-cli
-```
-
-Install the Binary Ninja companion plugin:
-
-```bash
 bn plugin install
-```
-
-That links the packaged `bn_agent_bridge` companion into your Binary Ninja plugins directory.
-
-Install the bundled Codex skill:
-
-```bash
 bn skill install
 ```
 
-That symlinks the packaged `bn` skill into `$CODEX_HOME/skills/bn` by default. Use `--mode copy` if you want a standalone copy instead. Restart Codex to pick up a new or renamed skill.
+The last two commands link the packaged plugin into Binary Ninja and the skill into `$CODEX_HOME/skills` (default `~/.codex/skills`). Use `--mode copy` for standalone copies. Restart Binary Ninja after installing or upgrading the plugin; restart Codex to discover a newly installed skill.
 
-Upgrade later with `uv tool upgrade bn-cli`.
+Upgrade with `uv tool upgrade bn-cli`. Reload Python plugins or restart Binary Ninja after code changes: **Restart Bridge** alone restarts the socket with the already-loaded Python code.
 
-Use `BN Agent Bridge\\Restart Bridge` from Binary Ninja's command palette to restart the socket bridge. After plugin code or version changes, reload Python plugins or restart Binary Ninja so Python imports the new module code.
-
-## How It Works
-
-- `bn` has two parts:
-  - a normal Python CLI that you can run from your shell or agent tool harness
-  - a Binary Ninja GUI plugin that owns all Binary Ninja API access
-- The plugin creates one fixed bridge socket and one fixed registry file.
-- The CLI discovers that bridge, connects to it, and forwards commands into the live GUI session.
-- Because the Binary Ninja side runs as a GUI plugin, it works with a personal license and does not require a commercial headless license.
-
-## Quick Start
-
-Open a binary or `.bndb` in Binary Ninja, then run:
-
-```bash
-bn doctor
-bn target list
-bn refresh
-bn function list
-bn decompile sub_401000
-```
-
-If exactly one BinaryView is open, target-specific commands can omit `--target` entirely. If multiple targets are open, pass `--target <selector>` from `bn target list`.
-
-## Target Selection
-
-Use `bn target list` to see available targets:
+## Start with a target
 
 ```bash
 bn target list
+bn decompile player_update --target crimsonland.exe.bndb
 ```
 
-Targets can be selected with:
+With exactly one open view, omit `--target`. With several, use the returned selector; omission fails instead of silently choosing a GUI tab. `--target` works anywhere in the command, and `BN_TARGET` sets a shell default. Use `--target active` only to deliberately follow the selected GUI tab.
 
-- the `selector` field from `bn target list`
-- the full `target_id`
-- the BinaryView basename
-- the full filename
-- the view id
-- `active` when you explicitly want the GUI-selected target
-
-In normal use, prefer the `selector` field. For a single open database, this is usually just the `.bndb` basename:
+## Common reads
 
 ```bash
-bn decompile update_player_movement_flags --target SnailMail_unwrapped.exe.bndb
-```
-
-`--target` may appear anywhere in the command, including before the top-level command, and `BN_TARGET` provides a shell-wide default:
-
-```bash
-bn --target SnailMail_unwrapped.exe.bndb decompile update_player_movement_flags
-bn function --target SnailMail_unwrapped.exe.bndb search attachment
-export BN_TARGET=SnailMail_unwrapped.exe.bndb
-```
-
-Omitting `--target` only works when exactly one target is open. If multiple targets are open, the CLI rejects the command instead of silently falling back to `active`.
-
-## Output Behavior
-
-Every command supports:
-
-- `--format json`
-- `--format text`
-- `--format ndjson`
-- `--out <path>`
-- `--match <regex>` with `--before` and `--after` text context
-- `--no-spill` to stream a complete result to stdout
-
-Interactive read commands default to `text`. Mutation, setup, and export commands default to `json`.
-Add `--format json` when you need stable fields for automation or piping into structured tooling.
-
-Examples:
-
-```bash
-bn function list --format ndjson
-bn function list --min-address 0x401000 --max-address 0x40ffff
+bn function search player
 bn function search --regex 'attach|detach'
-bn decompile sample_track_floor_height_at_position --out /tmp/floor.json
-```
-
-If `--out` is set, the command writes the rendered result to that path and prints a compact JSON envelope with the artifact path, byte size, token count, tokenizer, hash, and summary. Agents can use that envelope to decide whether to read the full artifact, keep a summary, or defer loading it into context.
-
-Use `--match` when an agent only needs a few lines from otherwise large text output. Use `--no-spill` when a downstream process must consume stdout directly and is prepared for the full result.
-
-`bn function list` and `bn function search` return the full matching set for the selected target or address range. Large results auto-spill to an artifact instead of forcing manual pagination. Spill is token-based and currently triggers above 10,000 tokens. When that happens, stdout stays empty and stderr carries the spill metadata as plain text, including the artifact path and size counts.
-
-## Extraction Commands
-
-Common read-only commands:
-
-```bash
-bn target list
-bn target info
-
-bn function list
-bn function list --min-address 0x401000 --max-address 0x40ffff
-bn function search attachment
-bn function search --regex 'attach|detach|follow'
-bn function info end_track_attachment_follow_state
-bn function containing 0x401234
+bn function info player_update
+bn function info player_update --locals
+bn decompile player_update
+bn il player_update --view mlil --ssa
+bn disasm player_update
+bn disasm 0x401234 --count 20
+bn disasm 0x401234 --end 0x401280
+bn xrefs player_update
+bn refs player_update
 bn callsites crt_rand --within bonus_pick_random_type
-bn callsites crt_rand
-bn callsites crt_rand --within-file /tmp/rng-functions.txt --format ndjson
-bn proto get end_track_attachment_follow_state
-bn local list end_track_attachment_follow_state
-bn refresh
-
-bn decompile end_track_attachment_follow_state
-bn il end_track_attachment_follow_state
-bn disasm end_track_attachment_follow_state
-bn disasm 0x401234 --before 5 --after 10
 bn address info global_player+0x308
 bn data read global_player+0x308 --type u32 --count 4
-bn xrefs end_track_attachment_follow_state
-bn xrefs global_player+0x308
-bn refs end_track_attachment_follow_state
-bn xrefs field TrackRowCell.tile_type
-bn comment get --address 0x401000
-
-bn types --query Player
-bn types show Player
 bn struct show Player
-bn types declare --file /path/to/win32_min.h --preview
-bn strings --query follow
-bn imports
-bn search text 'crt_rand' --view hlil --max-results 50
-bn search constant 0x370 --max-results 50
-bn schema --format json --out /tmp/bn-schema.json
+bn types show Player
+bn search text crt_rand --view hlil --max-results 50
 ```
 
-`bn function search` stays case-insensitive substring matching by default. Add `--regex` when you need regular expressions. `bn function list` and `bn function search` both accept `--min-address` and `--max-address` to filter by function start address.
+Function reads accept a name or an address inside a function. Address reads also accept symbols and `symbol+offset`. Function lists/searches support `--min-address` and `--max-address`.
 
-`bn callsites` is the direct-call lane for exact return-address recovery. It reports both the native `call_addr` and the post-call `caller_static`, where `caller_static = call_addr + instruction_length`. Without a scope it derives caller functions from Binary Ninja's inbound code-reference index. Use `--within <function>` or `--within-file <path>` to narrow the work; the file format is one function identifier per non-empty line, with `#` comments ignored.
+`function info` returns a compact summary; `--locals` or `local list` expands variables with stable IDs. `xrefs` finds inbound references; `refs` finds outbound references. `callsites` recovers native call addresses and exact post-call return addresses, with optional local HLIL/branch context. See the [callsite reference](src/bn/assets/skills/bn/references/callsites.md) for scoped and caller-static workflows.
 
-Read commands that take a function also accept an address inside that function. Address-bearing commands resolve numeric addresses, function names, data/import symbols, and `symbol+offset` expressions.
+Linear `disasm --count/--end` works without function analysis; `--end` is exclusive. Results report unmapped or undecodable stopping points. For analyzed-function windows, use `--before-instructions`/`--after-instructions`. Legacy `--before`/`--after` still select instruction windows without `--match`; with `--match`, they consistently mean text-line context.
 
-Whole-database searches stop after five seconds by default and return partial-result metadata when the time or result limit is reached. Raise the budget explicitly with `--timeout <seconds>` when a slower IL view is intentional.
+Whole-database `search text` and `search constant` have a five-second default analysis budget and report incomplete results. Increase their `--timeout` explicitly when needed; `function search` does not take that option.
 
-Each callsite row also includes:
-
-- `call_index`: zero-based ordinal for matching callsites in the containing function, ordered by `call_addr`
-- `within_query`: the original unresolved scope token from `--within` or `--within-file`
-- `hlil_statement`: the smallest recoverable HLIL expression or statement containing the call, or `null` when Binary Ninja only exposes a coarse enclosing region
-- `pre_branch_condition`: the nearest enclosing pre-call HLIL condition when it can be recovered confidently, otherwise `null`
-
-`hlil_statement` is intentionally local-or-null. If the best available HLIL mapping expands to a broad whole-function or multi-statement blob, `bn callsites` suppresses it instead of returning noisy context.
-
-## Bundles And Python
-
-`bn decompile` is the HLIL-text convenience lane. It is useful for quick function reading, but typed layouts remain authoritative in `bn types show` and `bn struct show`.
-
-Export a reusable function bundle:
+For the full command surface, use `bn --help`. Use scoped help or machine-readable discovery for details:
 
 ```bash
-bn bundle function end_track_attachment_follow_state --out /tmp/end_track_attachment_follow_state.json
+bn disasm --help
+bn schema disasm
+bn schema function info
 ```
 
-Run Python inside the Binary Ninja process for one-off inspection and BN-native scripting:
+Schema output defines common arguments once and references them from each command, with per-command defaults. It requires no live bridge.
+
+## Output and bundles
+
+Read commands default to text; mutations, setup, and bundles default to JSON.
+
+| Option | Behavior |
+|---|---|
+| `--format json` / `ndjson` | Complete structured stdout by default |
+| `--out <path>` | Write the full result; return its artifact envelope |
+| `--spill` | Explicitly allow large structured results to become artifact envelopes |
+| `--no-spill` | Stream complete text for pipelines |
+| `--match <regex>` | Keep matching text with optional `--before`/`--after` context |
+| `--tokens` | Request optional token counts in artifact metadata |
+
+Text above 40,000 bytes spills to a unique file, leaving a short preview on stdout and metadata on stderr. Explicit structured spills return an envelope on stdout. Artifact metadata includes path, format, bytes, SHA-256, and a summary. Normal output needs no tokenizer; install the `bn-cli[tokens]` extra for exact artifact counts. Unavailable tokenization produces a warning without losing the artifact.
 
 ```bash
-bn py exec --code "print(hex(bv.entry_point)); result = {'functions': len(list(bv.functions))}"
+bn decompile player_update --match 'health|damage' --before 2 --after 3
+bn bundle function player_update projectile_update --include decompile,disasm --out /tmp/functions.json
+```
 
-bn py exec --stdin <<'PY'
-print(hex(bv.entry_point))
-result = {"functions": len(list(bv.functions))}
+Bundles default to decompile, disassembly, and outbound references. Select `decompile,mlil,llil,disasm,locals,comments,xrefs,refs`, or `all` for full export. HLIL appears only once. Multiple identifiers are deduplicated; per-function errors preserve successful reads and produce a nonzero exit status.
+
+## Python
+
+`bn py` runs Python with unrestricted `bn`/`binaryninja` and `bv`/`current_view` access. `bn py exec` remains an alias. Use `--code` for one-liners, `--script` for saved files, or pipe multiline code with a quoted heredoc:
+
+```bash
+bn py <<'PY'
+f = function("player_update")
+result = {"address": hex(f.start), "instructions": sum(1 for _ in f.hlil.instructions)}
 PY
 ```
 
-Use `--stdin` or `--script` for multiline Python snippets. Use `--code` for true one-liners only.
+Helpers include `address`, `function`, `functions_containing`, typed `read_u*`/`read_i*`, `read_ptr`, `read_f32`, `read_f64`, and `read_cstr`. BN iterators may need materialization. Both stdout and `result` are returned; non-JSON results use `repr` with a warning. Syntax errors are caught locally; runtime errors retain the in-process traceback. Raw Python writes do not inherit built-in mutation rollback or verification.
 
-```bash
-bn py exec --stdin <<'PY'
-out = []
-for f in bv.functions:
-    if 0x416000 <= f.start < 0x41C000:
-        out.append((f.start, f.symbol.short_name))
-out.sort()
-print("\n".join(f"{addr:#x} {name}" for addr, name in out))
-PY
-```
-
-Use a quoted heredoc for multiline Python snippets.
-
-When you need counts from BN iterators such as `f.hlil.instructions`, materialize them explicitly with `list(...)` or consume them with `sum(1 for ...)` instead of assuming sequence semantics.
-
-The `py exec` environment includes:
-
-- `bn`
-- `binaryninja`
-- `bv`
-- `current_view` (an alias for `bv`)
-- `address`, `function`, and `functions_containing`
-- `read_u8`, `read_u16`, `read_u32`, `read_u64`
-- `read_i8`, `read_i16`, `read_i32`, `read_i64`
-- `read_ptr`, `read_f32`, `read_f64`, and `read_cstr`
-- `result`
-
-These small functions cover common API-shape mistakes without introducing a wrapper API or restricting the full Binary Ninja module or view object. Stdout and `result` are both returned. If `result` is not JSON-serializable, `bn` returns `repr(result)` and includes a warning instead of silently stringifying the whole response. Python failures include the in-process traceback and any stdout produced before the exception.
-
-## Agent Protocol
-
-`bn schema --format json` emits the protocol version plus the complete global and per-command argument surface without contacting Binary Ninja. `bn doctor --format json` reports the live plugin's supported operations and feature flags. Bridge failures use structured error codes and details in JSON/NDJSON mode, while text mode includes concise suggestions.
-
-## Mutation Commands
-
-Mutations follow the same target-selection rules as other target-specific commands.
-
-Examples:
+## Mutations
 
 ```bash
 bn symbol rename sub_401000 player_update --preview
-bn comment set --address 0x401000 "interesting branch" --preview
-bn comment get --address 0x401000
-bn proto get sub_401000
-bn proto set sub_401000 "int __cdecl player_update(Player* self)" --preview
-bn local list sub_401000
-bn local rename sub_401000 0x401000:local:StackVariableSourceType:-20:2:12345 speed --preview
-bn local retype sub_401000 0x401000:local:StackVariableSourceType:-20:2:12345 float --preview
-bn types declare "typedef struct Player { int hp; } Player;" --preview
+bn proto set player_update 'void player_update(Player* self)' --preview
 bn struct field set Player 0x308 movement_flag_selector uint32_t --preview
+bn types declare --file /path/to/types.h --preview
 ```
 
-Preview mode applies the change, refreshes analysis, captures affected decompile diffs, and then reverts the mutation.
+Preview applies, refreshes, verifies, captures diffs, then reverts. Omit `--preview` to commit a verified change. Failures roll back; results distinguish `verified`, `noop`, `unsupported`, and `verification_failed`, with requested/observed state where relevant. Use IDs from `local list` for local edits. Type imports preserve the source path for relative includes; declarations with no named types to persist report a no-op.
 
-Non-preview writes only report success after reading the live BN session back and verifying that the requested post-state actually landed. If verification fails, the CLI returns a nonzero exit code and reverts the mutation.
+Read back the relevant prototype/type and decompile after changes. `types show` and `struct show` are authoritative when HLIL still displays stale `__offset(...)` expressions. `bn refresh` refreshes analysis but may not eliminate every presentation artifact.
 
-After any live type or prototype mutation, do an explicit readback:
+## Troubleshooting and development
+
+`bn doctor` checks discovery, capabilities, installed code, and stale loaded plugin versions. If no targets appear, open a database and check that the companion is loaded. A socket `Operation not permitted` under Codex indicates sandbox access; run the authorized `bn` command outside that sandbox. Avoid reinstalling the plugin to fix a permission denial.
 
 ```bash
-bn proto get sub_401000
-bn struct show Player
-bn types show Player
-bn decompile sub_401000
-```
-
-For declaration and struct mutations, preview results also include `affected_types` with before/after layouts and a unified diff. If a field edit is already identical, the result is marked with `changed: false` and a `No effective change detected` message.
-
-For the first few changed functions, `affected_functions` also includes short `before_excerpt` and `after_excerpt` snippets around the first changed HLIL lines.
-
-Mutation results now distinguish:
-
-- `verified`
-- `noop`
-- `unsupported`
-- `verification_failed`
-
-When verification fails, JSON output also includes `requested` and `observed` state for the failed op.
-
-`bn types declare` now uses Binary Ninja's source parser when available. When you pass `--file`, the CLI also forwards the source path so relative includes resolve the same way they would during header import in the GUI.
-
-If a declaration only parses functions or extern variables and introduces no named types to persist, `types declare` returns a verified no-op instead of failing with `No named types found in declaration`.
-
-`bn local list` and `bn function info` return stable `local_id` values for parameters and locals. Prefer those IDs for `bn local rename` and `bn local retype`; legacy name-based targeting still works for compatibility.
-
-## Troubleshooting
-
-Check bridge state:
-
-```bash
-bn doctor
-```
-
-If `bn target list` is empty:
-
-- make sure Binary Ninja is open
-- make sure a binary or `.bndb` is open
-- make sure the plugin is installed with `bn plugin install`
-- reload Binary Ninja plugins or restart Binary Ninja after plugin changes
-
-If `bn doctor` sees a bridge registry but reports `Operation not permitted` under Codex,
-the Codex sandbox is blocking the Unix socket that connects to the live Binary Ninja GUI
-process. Let Codex run `bn` outside the sandbox by adding this rule to
-`~/.codex/rules/default.rules`:
-
-```text
-prefix_rule(pattern=["bn"], decision="allow")
-```
-
-Restart Codex or reload rules after editing the file. This is only needed for Codex
-sandboxed runs; normal shells can use `bn` without that rule.
-
-If multiple targets are open, omitted `--target` is rejected. Pass `--target <selector>` from `bn target list`, or use `--target active` only when you intentionally want the GUI-selected target.
-
-If decompile text still looks stale after a type change, run:
-
-```bash
-bn refresh
-```
-
-That forces an analysis refresh, but it still may not fully eliminate Binary Ninja's stale `__offset(...)` presentation in every case.
-
-## Development
-
-Run tests with:
-
-```bash
+uv sync --locked
 uv run pytest
-```
-
-Run the CLI from the repo without installing it globally:
-
-```bash
 uv run bn --help
-```
-
-Install an editable development build as a uv tool with:
-
-```bash
-uv tool install -e .
-```
-
-Verify that package, plugin, and lockfile versions agree:
-
-```bash
 uv run python scripts/release.py --check
+uv build
 ```
 
-For a release, update every version field with one command before editing the changelog and creating the tag:
-
-```bash
-uv run python scripts/release.py 0.14.0
-```
-
-Pushing the matching `v0.14.0` tag runs the publish workflow, which tests, builds, publishes the distributions to PyPI through Trusted Publishing, and creates the GitHub release from the same artifacts.
+For editable development, use `uv tool install -e .`. To prepare a release, run `uv run python scripts/release.py <version>`, update [CHANGELOG.md](CHANGELOG.md), commit, and push the matching `v<version>` tag. CI tests Python 3.12/3.14, verifies the wheel, publishes to PyPI, and creates the GitHub release. The CLI and companion must use the same protocol version; restart/reload the companion after upgrades.
