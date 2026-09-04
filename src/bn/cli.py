@@ -392,15 +392,7 @@ def _render_fallback_text(value: Any) -> str:
 
 def _format_local_entry(item: dict[str, Any]) -> str:
     role = "param" if item.get("is_parameter") else "local"
-    details = [f"storage={item.get('storage', '?')}"]
-    if item.get("source_type"):
-        details.append(f"source={item['source_type']}")
-    if item.get("index") is not None:
-        details.append(f"index={item['index']}")
-    if item.get("identifier") is not None:
-        details.append(f"identifier={item['identifier']}")
-    if item.get("local_id"):
-        details.append(f"id={item['local_id']}")
+    details = [f"id={item['local_id']}"] if item.get("local_id") else [f"storage={item.get('storage', '?')}"]
     return (
         f"- {item.get('type', '<unknown>')} {item.get('name', '<unknown>')} "
         f"[{role}; {'; '.join(details)}]"
@@ -432,6 +424,8 @@ def _render_function_info_text(value: Any) -> str:
         "",
         "parameters:",
     ]
+    if "parameters" not in value and "locals" not in value:
+        return "\n".join(lines[:-2] + [f"parameters: {value.get('parameter_count', 0)}", f"locals: {value.get('local_count', 0)} (use --locals to expand)"])
     parameters = list(value.get("parameters") or [])
     if parameters:
         for item in parameters:
@@ -1218,7 +1212,7 @@ def _function_info(args: argparse.Namespace) -> int:
     return _call(
         args,
         "function_info",
-        {"identifier": args.identifier},
+        {"identifier": args.identifier, "include_locals": args.locals},
         text_renderer=_render_function_info_text,
         stem="function-info",
     )
@@ -1463,12 +1457,16 @@ def _imports(args: argparse.Namespace) -> int:
 
 
 def _bundle_function(args: argparse.Namespace) -> int:
-    return _call(
-        args,
-        "bundle_function",
-        {"identifier": args.identifier},
-        stem="function-bundle",
-    )
+    identifiers = list(dict.fromkeys(args.identifiers))
+    params = {"identifier": identifiers[0]} if len(identifiers) == 1 else {"identifiers": identifiers}
+    if args.include is not None:
+        sections = [section.strip() for section in args.include.split(",")]
+        valid = {"decompile", "mlil", "llil", "disasm", "locals", "comments", "xrefs", "refs"}
+        if set(sections) != {"all"} and (not all(sections) or set(sections) - valid):
+            raise BridgeError("Invalid --include. Choose decompile,mlil,llil,disasm,locals,comments,xrefs,refs or all")
+        params["include"] = sections
+    return _call(args, "bundle_function", params, stem="function-bundle",
+                 result_exit_code=lambda result: 1 if result.get("success") is False else 0)
 
 
 def _py_exec(args: argparse.Namespace) -> int:
@@ -1835,6 +1833,7 @@ def build_parser() -> argparse.ArgumentParser:
     _common_io_options(function_info)
     _target_option(function_info, required=False)
     function_info.add_argument("identifier")
+    function_info.add_argument("--locals", action="store_true", help="Include full parameter and local variable details")
     function_info.set_defaults(handler=_function_info)
     function_containing = function_sub.add_parser(
         "containing",
@@ -1989,7 +1988,8 @@ def build_parser() -> argparse.ArgumentParser:
     bundle_function = bundle_sub.add_parser("function", help="Export a function bundle")
     _common_io_options(bundle_function, default_format="json")
     _target_option(bundle_function, required=False)
-    bundle_function.add_argument("identifier")
+    bundle_function.add_argument("identifiers", nargs="+")
+    bundle_function.add_argument("--include", help="Comma-separated sections (default: decompile,disasm,refs); all for full export")
     bundle_function.set_defaults(handler=_bundle_function)
 
     py = subparsers.add_parser("py", help="Execute Python inside Binary Ninja")

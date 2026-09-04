@@ -167,7 +167,7 @@ class BinaryNinjaBridge:
                 within_identifiers=list(params.get("within_identifiers") or []),
                 context=int(params.get("context", 3)),
             ),
-            "function_info": lambda params, target: self._function_info(target, params["identifier"]),
+            "function_info": lambda params, target: self._function_info(target, params["identifier"], include_locals=bool(params.get("include_locals"))),
             "function_containing": lambda params, target: self._function_containing(target, params["address"]),
             "get_prototype": lambda params, target: self._get_prototype(target, params["identifier"]),
             "list_locals": lambda params, target: self._list_locals_for_function(target, params["identifier"]),
@@ -219,7 +219,7 @@ class BinaryNinjaBridge:
                 limit=int(params.get("limit", 100)),
             ),
             "imports": lambda _params, target: self._imports(target),
-            "bundle_function": lambda params, target: self._bundle_function(target, params["identifier"]),
+            "bundle_function": lambda params, target: self._bundle_request(target, params),
             "py_exec": lambda params, target: self._py_exec(target, str(params["script"])),
             "get_comment": lambda params, target: self._get_comment(
                 target,
@@ -1426,7 +1426,7 @@ class BinaryNinjaBridge:
             "warnings": warnings,
         }
 
-    def _function_info(self, selector: str | None, identifier):
+    def _function_info(self, selector: str | None, identifier, *, include_locals: bool = False):
         bv = self._resolve_view(selector)
         func = self._find_function(bv, identifier, allow_containing=True)
         metadata = self._function_metadata(func)
@@ -1440,8 +1440,9 @@ class BinaryNinjaBridge:
                 "raw_name": getattr(func, "raw_name", func.name),
             },
             **metadata,
-            "parameters": parameters,
-            "locals": locals_only,
+            "parameter_count": len(parameters),
+            "local_count": len(locals_only),
+            **({"parameters": parameters, "locals": locals_only} if include_locals else {}),
         }
 
     def _get_prototype(self, selector: str | None, identifier):
@@ -2067,29 +2068,62 @@ class BinaryNinjaBridge:
             "has_comment": bool(comment),
         }
 
-    def _bundle_function(self, selector: str | None, identifier):
+    def _bundle_request(self, selector: str | None, params: dict[str, Any]):
+        include = params.get("include")
+        self._bundle_sections(include)  # Validate once, before any reads.
+        if "identifiers" not in params:
+            return self._bundle_function(selector, params["identifier"], include=include)
+        # Pin the target once for the whole request, even when selector is "active".
+        target = self._target_info(selector)
+        pinned = target.get("target_id") or target.get("selector") or selector
+        functions = []
+        for identifier in dict.fromkeys(params["identifiers"]):
+            try:
+                result = self._bundle_function(pinned, identifier, include=include)
+                result.pop("target", None)
+                functions.append({"identifier": identifier, "ok": True, **result})
+            except Exception as exc:
+                functions.append({"identifier": identifier, "ok": False,
+                                  "error": {"code": getattr(exc, "status", type(exc).__name__), "message": str(exc)}})
+        return {"target": target, "functions": functions,
+                "success": all(item["ok"] for item in functions)}
+
+    @staticmethod
+    def _bundle_sections(include):
+        available = {"decompile", "mlil", "llil", "disasm", "locals", "comments", "xrefs", "refs"}
+        sections = set(include) if include is not None else {"decompile", "disasm", "refs"}
+        if sections == {"all"}:
+            return available
+        if not sections or sections - available:
+            raise OperationFailure("invalid_sections", "Bundle sections: " + ", ".join(sorted(available)) + ", all")
+        return sections
+
+    def _bundle_function(self, selector: str | None, identifier, *, include=None):
+        sections = self._bundle_sections(include)
         bv = self._resolve_view(selector)
-        func = self._find_function(bv, identifier)
-        decompile = self._function_text(bv, func, view="hlil")
+        func = self._find_function(bv, identifier, allow_containing=True)
         bundle = {
             "target": self._target_info(selector),
-            "function": {
-                "name": func.name,
-                "address": hex(func.start),
-                "raw_name": getattr(func, "raw_name", func.name),
-                "type": str(func.type),
-            },
-            "decompile": decompile,
-            "warnings": self._render_warnings(decompile),
-            "il": {
-                "hlil": decompile,
-                "mlil": self._function_text(bv, func, view="mlil"),
-            },
-            "disassembly": self._disasm_text(bv, func),
-            "locals": self._list_locals(func),
-            "comments": dict(sorted(self._comment_map(bv, func).items())),
-            "xrefs": self._xrefs_to_address(bv, func.start),
+            "function": {"name": func.name, "address": hex(func.start),
+                         "raw_name": getattr(func, "raw_name", func.name), "type": str(func.type)},
         }
+        if "decompile" in sections:
+            text = self._function_text(bv, func, view="hlil")
+            bundle["decompile"] = text
+            bundle["warnings"] = self._render_warnings(text)
+        for view in ("mlil", "llil"):
+            if view in sections:
+                bundle.setdefault("il", {})[view] = self._function_text(bv, func, view=view)
+        if "disasm" in sections:
+            bundle["disassembly"] = self._disasm_text(bv, func)
+        if "locals" in sections:
+            bundle["locals"] = self._list_locals(func)
+        if "comments" in sections:
+            bundle["comments"] = dict(sorted(self._comment_map(bv, func).items()))
+        if "xrefs" in sections:
+            bundle["xrefs"] = self._xrefs_to_address(bv, func.start)
+        if "refs" in sections:
+            bundle["refs"] = self._refs_from(selector, func.start)
         return bundle
 
     def _py_exec(self, selector: str | None, script: str):

@@ -1545,3 +1545,35 @@ def test_mutation_reverts_unexpected_apply_error(monkeypatch, preview):
     with pytest.raises(RuntimeError, match="API failed"):
         instance._mutation(None, preview, {"op": "rename_symbol"})
     assert calls == [("write", None), ("revert", "undo")]
+
+
+def test_selective_bundle_skips_unrequested_analysis(monkeypatch):
+    module = _load_bridge(monkeypatch)
+    instance = module.BinaryNinjaBridge()
+    function = _FakeFunction(0x401000, "small")
+    monkeypatch.setattr(instance, "_resolve_view", lambda _: object())
+    monkeypatch.setattr(instance, "_find_function", lambda *a, **k: function)
+    monkeypatch.setattr(instance, "_target_info", lambda _: {"selector": "test"})
+    monkeypatch.setattr(instance, "_function_text", lambda *a, **k: "return 1")
+    for name in ("_list_locals", "_disasm_text", "_refs_from", "_comment_map", "_xrefs_to_address"):
+        monkeypatch.setattr(instance, name, lambda *a, **k: pytest.fail("unrequested analysis"))
+    result = instance._bundle_function("test", "small", include=["decompile"])
+    assert result["decompile"] == "return 1"
+    assert set(result) == {"target", "function", "decompile", "warnings"}
+
+
+def test_multi_bundle_deduplicates_and_preserves_partial_results(monkeypatch):
+    module = _load_bridge(monkeypatch)
+    instance = module.BinaryNinjaBridge()
+    calls = []
+    monkeypatch.setattr(instance, "_target_info", lambda _: {"selector": "test", "target_id": "fixed"})
+    def bundle(selector, identifier, **kwargs):
+        calls.append((selector, identifier))
+        if identifier == "missing":
+            raise ValueError("not found")
+        return {"target": {}, "function": {"name": identifier}}
+    monkeypatch.setattr(instance, "_bundle_function", bundle)
+    result = instance._bundle_request("active", {"identifiers": ["a", "missing", "a", "b"]})
+    assert calls == [("fixed", "a"), ("fixed", "missing"), ("fixed", "b")]
+    assert [r["ok"] for r in result["functions"]] == [True, False, True]
+    assert result["success"] is False
