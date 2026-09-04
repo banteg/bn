@@ -3,6 +3,8 @@ from __future__ import annotations
 import functools
 import hashlib
 import json
+import os
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -62,7 +64,9 @@ def _spill_path(stem: str, suffix: str) -> Path:
     now = datetime.now(timezone.utc)
     directory = spill_root() / now.strftime("%Y%m%d")
     directory.mkdir(parents=True, exist_ok=True)
-    return directory / f"{stem}-{now.strftime('%H%M%S')}{suffix}"
+    fd, name = tempfile.mkstemp(prefix=f"{stem}-{now.strftime('%H%M%S')}-", suffix=suffix, dir=directory)
+    os.close(fd)
+    return Path(name)
 
 
 @functools.cache

@@ -114,3 +114,28 @@ def test_write_output_reports_exact_tokens_for_explicit_out_path(tmp_path, monke
     assert envelope["artifact_path"] == str(out_path)
     assert envelope["tokenizer"] == TOKENIZER
     assert envelope["tokens"] == _token_count(artifact_text)
+
+
+def test_concurrent_spills_preserve_distinct_payloads(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import hashlib
+    import bn.output as output
+
+    class Encoder:
+        def encode(self, text):
+            return list(text)
+
+    monkeypatch.setattr(output, "spill_root", lambda: tmp_path)
+    monkeypatch.setattr(output, "_token_encoding", lambda: Encoder())
+    def write(index):
+        payload = f"function {index}\n"
+        result = output.write_output_result(payload, fmt="text", out_path=None,
+                                            stem="decompile", spill_token_limit=1)
+        return payload, result.artifact
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(write, range(32)))
+    assert len({artifact["artifact_path"] for _, artifact in results}) == 32
+    for payload, artifact in results:
+        content = Path(artifact["artifact_path"]).read_bytes()
+        assert content.decode() == payload
+        assert hashlib.sha256(content).hexdigest() == artifact["sha256"]
