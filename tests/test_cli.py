@@ -1351,3 +1351,46 @@ def test_disasm_match_context_and_linear_extent(monkeypatch, capsys):
     assert bn.cli.main(["disasm", "0x1000", "--count", "3", "--match", "needle", "--before", "1"]) == 0
     assert calls == [{"identifier": "0x1000", "before": None, "after": None, "count": 3, "end": None}]
     assert capsys.readouterr().out.strip() == "first\nneedle"
+
+
+@pytest.mark.parametrize("alias", [[], ["exec"]])
+def test_python_accepts_piped_input_without_source_flags(monkeypatch, capsys, alias):
+    import io
+    monkeypatch.setattr(bn.cli.sys, "stdin", io.StringIO("result = 42\n"))
+    def send(op, **kwargs):
+        assert kwargs["params"] == {"script": "result = 42\n"}
+        return {"result": {"result": 42, "stdout": ""}}
+    monkeypatch.setattr(bn.cli, "send_request", send)
+    assert bn.cli.main(["py", *alias]) == 0
+
+
+def test_python_rejects_empty_interactive_and_invalid_input_locally(monkeypatch, capsys):
+    import io
+    def unexpected(*a, **k):
+        pytest.fail("must not contact bridge")
+    monkeypatch.setattr(bn.cli, "send_request", unexpected)
+    monkeypatch.setattr(bn.cli.sys, "stdin", io.StringIO(""))
+    assert bn.cli.main(["py"]) == 2
+    monkeypatch.setattr(bn.cli.sys.stdin, "isatty", lambda: True)
+    assert bn.cli.main(["py"]) == 2
+    assert bn.cli.main(["py", "--code", "for:"]) == 2
+
+
+def test_scoped_schema_is_small_and_shared_options_resolve(capsys):
+    assert bn.cli.main(["schema", "disasm"]) == 0
+    text = capsys.readouterr().out
+    assert len(text) < 10000
+    schema = json.loads(text)
+    assert set(schema["commands"]) == {"disasm"}
+    command = schema["commands"]["disasm"]
+    assert "format" in command["common_arguments"]
+    assert schema["common_arguments"]["format"]["choices"] == ["json", "text", "ndjson"]
+    assert command["defaults"]["format"] == "text"
+
+
+def test_argument_error_identifies_selected_command_and_recovery(capsys):
+    with pytest.raises(SystemExit):
+        bn.cli.main(["function", "list", "--filter", "player"])
+    error = capsys.readouterr().err
+    assert "usage: bn function list" in error
+    assert "bn function search" in error

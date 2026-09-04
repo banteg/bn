@@ -1483,7 +1483,15 @@ def _py_exec(args: argparse.Namespace) -> int:
             raise BridgeError(f"Script file not found: {args.script}. Use --code for inline Python.")
         script = args.script.read_text(encoding="utf-8")
     else:
+        if sys.stdin.isatty():
+            raise BridgeError("Provide --code, --script, or pipe Python to bn py")
         script = sys.stdin.read()
+    if not script.strip():
+        raise BridgeError("Python input is empty")
+    try:
+        compile(script, str(args.script) if args.script else "<bn py>", "exec")
+    except SyntaxError as exc:
+        raise BridgeError(f"Invalid Python at line {exc.lineno}: {exc.msg}. Use a quoted heredoc for multiline code.") from exc
 
     return _call(
         args,
@@ -1741,6 +1749,23 @@ def _command_schema(parser: argparse.ArgumentParser) -> dict[str, Any]:
                 visit(child, [*path, name])
 
     visit(parser, [])
+    commands["py exec"] = {**commands["py"], "alias_of": "py"}
+    common_destinations = {"format", "out", "match", "match_before", "match_after", "no_spill", "spill", "tokens", "target"}
+    common = {}
+    for command in commands.values():
+        specific = []
+        shared = []
+        defaults = {}
+        for argument in command["arguments"]:
+            dest = argument["dest"]
+            if dest in common_destinations:
+                common.setdefault(dest, {k: v for k, v in argument.items() if k != "default"})
+                shared.append(dest)
+                if "default" in argument:
+                    defaults[dest] = argument["default"]
+            else:
+                specific.append(argument)
+        command.update(arguments=specific, common_arguments=shared, defaults=defaults)
     global_arguments = [
         _schema_action(action)
         for action in parser._actions
@@ -1751,6 +1776,7 @@ def _command_schema(parser: argparse.ArgumentParser) -> dict[str, Any]:
         "version": VERSION,
         "protocol_version": PROTOCOL_VERSION,
         "global_arguments": global_arguments,
+        "common_arguments": common,
         "environment": {"BN_TARGET": "Default target selector"},
         "commands": commands,
     }
@@ -1758,6 +1784,14 @@ def _command_schema(parser: argparse.ArgumentParser) -> dict[str, Any]:
 
 def _schema(args: argparse.Namespace) -> int:
     value = _command_schema(build_parser())
+    path = " ".join(args.path)
+    if path:
+        value["commands"] = {name: command for name, command in value["commands"].items()
+                             if name == path or name.startswith(path + " ")}
+        if not value["commands"]:
+            raise BridgeError(f"Unknown schema command: {path}")
+        used = {name for command in value["commands"].values() for name in command["common_arguments"]}
+        value["common_arguments"] = {name: definition for name, definition in value["common_arguments"].items() if name in used}
     if args.format == "text":
         value = "\n".join(sorted(value["commands"]))
     _render_direct_result(args, value, stem="schema")
@@ -1778,6 +1812,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     schema = subparsers.add_parser("schema", help="Describe the complete command surface as data")
     _common_io_options(schema, default_format="json")
+    schema.add_argument("path", nargs="*", help="Optional command path, e.g. disasm or function info")
     schema.set_defaults(handler=_schema)
 
     doctor = subparsers.add_parser("doctor", help="Validate bridge discovery and installation")
@@ -1860,7 +1895,7 @@ def build_parser() -> argparse.ArgumentParser:
     _common_io_options(il)
     _target_option(il, required=False)
     il.add_argument("identifier")
-    il.add_argument("--view", choices=("hlil", "mlil", "llil"), default="hlil")
+    il.add_argument("--view", "--level", choices=("hlil", "mlil", "llil"), default="hlil")
     il.add_argument("--ssa", action="store_true")
     il.set_defaults(handler=_il)
 
@@ -2002,15 +2037,14 @@ def build_parser() -> argparse.ArgumentParser:
     bundle_function.set_defaults(handler=_bundle_function)
 
     py = subparsers.add_parser("py", help="Execute Python inside Binary Ninja")
-    py_sub = py.add_subparsers(dest="py_command")
-    py_exec = py_sub.add_parser("exec", help="Execute a Python snippet")
-    _common_io_options(py_exec)
-    _target_option(py_exec, required=False)
-    source = py_exec.add_mutually_exclusive_group(required=True)
+    _common_io_options(py)
+    _target_option(py, required=False)
+    py.add_argument("py_command", nargs="?", choices=("exec",), help="Optional compatibility alias")
+    source = py.add_mutually_exclusive_group()
     source.add_argument("--script", type=Path, help="Read Python code from a file")
     source.add_argument("--code", help="Inline Python code")
-    source.add_argument("--stdin", action="store_true")
-    py_exec.set_defaults(handler=_py_exec)
+    source.add_argument("--stdin", action="store_true", help="Read Python from stdin (automatic when piped)")
+    py.set_defaults(handler=_py_exec)
 
     symbol = subparsers.add_parser("symbol", help="Rename functions or data")
     symbol_sub = symbol.add_subparsers(dest="symbol_command")
@@ -2166,7 +2200,13 @@ def _parse_args(parser: argparse.ArgumentParser, argv: list[str]) -> argparse.Na
         args.extra = extra
         return args
 
-    parser.error("unrecognized arguments: " + " ".join(extra))
+    selected = getattr(args, "_parser", parser)
+    hints = {"--json": "Use --format json.", "--filter": "Use bn function search <query>.",
+             "--timeout": "Only database text/constant searches support --timeout.",
+             "--max-lines": "Use --match with --before/--after for text context.",
+             "--length": "Use --count <instructions> or --end <exclusive address>."}
+    hint = next((hints[item] for item in extra if item in hints), f"See {selected.prog} --help.")
+    selected.error("unrecognized arguments: " + " ".join(extra) + "\n" + hint)
 
 
 def main(argv: list[str] | None = None) -> int:
