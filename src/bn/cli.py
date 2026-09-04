@@ -268,7 +268,7 @@ def _filter_text_result(value: str, pattern: str, *, before: int, after: int) ->
 
 def _render_direct_result(args: argparse.Namespace, value: Any, *, stem: str) -> None:
     match = getattr(args, "match", None)
-    if match:
+    if match is not None:
         if args.format != "text":
             raise BridgeError("--match is only valid with --format text")
         if not isinstance(value, str):
@@ -358,7 +358,7 @@ def _call(
     if text_renderer is not None and args.format == "text":
         result = text_renderer(result)
     match = getattr(args, "match", None)
-    if match:
+    if match is not None:
         if args.format != "text":
             raise BridgeError("--match is only valid with --format text")
         if not isinstance(result, str):
