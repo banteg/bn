@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 
 def _plugin_version() -> str:

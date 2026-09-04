@@ -5,6 +5,7 @@ import types
 
 import bn.cli
 import pytest
+from bn.version import PROTOCOL_VERSION
 
 
 def test_function_list_sends_omitted_target_to_bridge(monkeypatch, capsys):
@@ -826,7 +827,7 @@ def test_schema_is_machine_readable_without_a_bridge(tmp_path, capsys):
     envelope = json.loads(capsys.readouterr().out)
     assert envelope["ok"] is True
     schema = json.loads(path.read_text())
-    assert schema["protocol_version"] == 1
+    assert schema["protocol_version"] == PROTOCOL_VERSION
     assert any("--target" in item.get("options", []) for item in schema["global_arguments"])
     assert "py exec" in schema["commands"]
     assert "data read" in schema["commands"]

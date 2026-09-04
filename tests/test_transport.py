@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from bn.version import PROTOCOL_VERSION
 
 from bn.paths import bridge_registry_path
 from bn.transport import choose_instance, list_instances, send_request
@@ -72,7 +73,7 @@ def test_send_request_uses_registry_and_socket(tmp_path, monkeypatch):
                 "socket_path": str(socket_path),
                 "plugin_name": "bn_agent_bridge",
                 "plugin_version": "0.1.0",
-                "protocol_version": 1,
+                "protocol_version": PROTOCOL_VERSION,
             }
         ),
         encoding="utf-8",
@@ -83,11 +84,11 @@ def test_send_request_uses_registry_and_socket(tmp_path, monkeypatch):
         assert len(instances) == 1
         instance = choose_instance()
         assert instance.pid == pid
-        assert instance.protocol_version == 1
+        assert instance.protocol_version == PROTOCOL_VERSION
 
         response = send_request("ping", params={"hello": "world"}, target=f"{pid}:1:999")
         assert response["result"]["op"] == "ping"
-        assert response["result"]["protocol_version"] == 1
+        assert response["result"]["protocol_version"] == PROTOCOL_VERSION
         assert response["result"]["params"] == {"hello": "world"}
     finally:
         server.shutdown()

@@ -8,6 +8,7 @@ import types
 from pathlib import Path
 
 import pytest
+from bn.version import PROTOCOL_VERSION
 
 
 def _load_bridge(monkeypatch):
@@ -433,7 +434,7 @@ def test_doctor_advertises_protocol_capabilities(monkeypatch):
 
     result = instance._doctor()
 
-    assert result["protocol_version"] == 1
+    assert result["protocol_version"] == PROTOCOL_VERSION
     assert "py_exec" in result["capabilities"]["operations"]
     assert "batch_apply" not in result["capabilities"]["operations"]
     assert set(result["capabilities"]["operations"]) == set(instance._operation_handlers())
@@ -469,14 +470,14 @@ def test_dispatch_rejects_protocol_mismatch(monkeypatch):
     assert response["ok"] is False
     assert response["error"]["code"] == "protocol_mismatch"
     assert response["error"]["requested"] == {"protocol_version": 999}
-    assert response["error"]["observed"] == {"protocol_version": 1}
+    assert response["error"]["observed"] == {"protocol_version": PROTOCOL_VERSION}
 
 
 def test_dispatch_rejects_unknown_operation(monkeypatch):
     bridge = _load_bridge(monkeypatch)
     instance = bridge.BinaryNinjaBridge()
 
-    response = instance.dispatch({"protocol_version": 1, "op": "missing", "params": {}})
+    response = instance.dispatch({"protocol_version": PROTOCOL_VERSION, "op": "missing", "params": {}})
 
     assert response["ok"] is False
     assert response["error"]["code"] == "unknown_operation"

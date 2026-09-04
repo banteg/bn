@@ -6,6 +6,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-09-04
+
+### Changed
+
+- JSON/NDJSON now stream complete results by default; use `--spill` to explicitly request large-result artifacts. Text spills above 40,000 bytes with a short preview and a unique artifact path.
+- Removed the mandatory tokenizer dependency. The optional `tokens` extra and `--tokens` enable artifact counts; unavailable counting no longer prevents output.
+- Function info defaults to a compact summary; `--locals` expands parameters and locals. Text local rows retain stable IDs without redundant metadata.
+- Function bundles default to decompile, disassembly, and outbound references. `--include` selects sections, `all` exports everything, and multiple identifiers return per-function results/errors without duplicated HLIL.
+- Shortened the README and agent skill; moved detailed callsite guidance into a focused reference.
+- Bumped the bridge protocol to 2. Upgrade/reload the companion with the CLI; old loaded plugins reject the new protocol rather than ignoring new parameters.
+
+### Added
+
+- Linear `disasm --count` and exclusive `--end` ranges, independent of function analysis, with explicit decode stopping metadata.
+- Explicit `--before-instructions`/`--after-instructions` windows. With `--match`, `--before`/`--after` consistently mean text context; legacy instruction aliases remain supported without `--match`.
+- Direct `bn py` with automatic piped input, local syntax validation, and the compatible `bn py exec` spelling.
+- Scoped schemas such as `bn schema disasm`, shared argument definitions, and selected-command argument errors with recovery suggestions. IL also accepts `--level` as an alias for `--view`.
+
+### Fixed
+
+- Concurrent spills no longer overwrite one another.
+- Unexpected exceptions during mutation application now roll back; invalid output options are rejected before writes.
+- Typed Python reads respect Binary Ninja endianness enums.
+
 ## [0.14.1] - 2026-07-14
 
 ### Added
