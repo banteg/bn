@@ -151,7 +151,10 @@ def _common_io_options(
             default=0,
             help="Context lines after each --match",
         )
-    parser.add_argument(
+    spill = parser.add_mutually_exclusive_group()
+    spill.add_argument("--spill", action="store_true", help="Explicitly spill large structured output to an artifact")
+    parser.add_argument("--tokens", action="store_true", help="Include optional exact token counts in artifact metadata")
+    spill.add_argument(
         "--no-spill",
         action="store_true",
         help="Stream the complete result to stdout even above the automatic spill limit",
@@ -181,17 +184,20 @@ def _render_result(
     stem: str,
     spill_label: str | None = None,
     spill_context: Any = None,
-    allow_spill: bool = True,
+    allow_spill: bool | None = None,
+    count_tokens: bool = False,
 ) -> None:
     output_args: dict[str, Any] = {
         "fmt": fmt,
         "out_path": out_path,
         "stem": stem,
     }
-    if not allow_spill:
-        output_args["allow_spill"] = False
+    if allow_spill is not None:
+        output_args["allow_spill"] = allow_spill
+    if count_tokens:
+        output_args["count_tokens"] = True
     result = write_output_result(value, **output_args)
-    if result.spilled and result.artifact:
+    if result.spilled and result.artifact and fmt == "text":
         label = spill_label or stem.replace("_", " ")
         artifact = result.artifact
         lines = [
@@ -199,9 +205,11 @@ def _render_result(
             f"path: {artifact['artifact_path']}",
             f"format: {artifact['format']}",
             f"bytes: {artifact['bytes']}",
-            f"tokens: {artifact['tokens']}",
-            f"tokenizer: {artifact['tokenizer']}",
+
         ]
+        for key in ("tokens", "tokenizer", "token_count_warning"):
+            if key in artifact:
+                lines.append(f"{key}: {artifact[key]}")
         if isinstance(artifact.get("sha256"), str):
             lines.append(f"sha256: {artifact['sha256']}")
         summary = artifact.get("summary")
@@ -223,6 +231,8 @@ def _render_result(
         if isinstance(value, str):
             lines.append(f"lines: {len(value.splitlines())}")
         print("\n".join(lines), file=sys.stderr)
+        preview = "\n".join(str(value).splitlines()[:20])[:2000]
+        print(preview + f"\n… full output: {artifact['artifact_path']}")
         return
     sys.stdout.write(result.rendered)
 
@@ -276,7 +286,8 @@ def _render_direct_result(args: argparse.Namespace, value: Any, *, stem: str) ->
         fmt=args.format,
         out_path=args.out,
         stem=stem,
-        allow_spill=not bool(getattr(args, "no_spill", False)),
+        allow_spill=False if getattr(args, "no_spill", False) else True if getattr(args, "spill", False) else None,
+        count_tokens=bool(getattr(args, "tokens", False)),
     )
 
 
@@ -367,7 +378,8 @@ def _call(
         stem=stem,
         spill_label=page_label or op.replace("_", " "),
         spill_context=spill_context,
-        allow_spill=not bool(getattr(args, "no_spill", False)),
+        allow_spill=False if getattr(args, "no_spill", False) else True if getattr(args, "spill", False) else None,
+        count_tokens=bool(getattr(args, "tokens", False)),
     )
     return exit_code
 

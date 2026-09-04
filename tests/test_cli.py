@@ -149,7 +149,7 @@ def test_function_list_warns_when_output_auto_spills(monkeypatch, capsys):
 
     assert rc == 0
     stdout, stderr = capsys.readouterr()
-    assert stdout == ""
+    assert "full output: /tmp/functions.txt" in stdout
     assert captured["value"] == "0x401000  sub_401000\n0x402000  sub_402000"
     assert "warning: function list output spilled" in stderr
     assert "path: /tmp/functions.txt" in stderr
@@ -968,7 +968,8 @@ def test_bundle_function_out_path_uses_standard_output_pipeline(monkeypatch, tmp
     assert json.loads(out_path.read_text())["function"]["name"] == "sub_401000"
     payload = json.loads(capsys.readouterr().out)
     assert payload["artifact_path"] == str(out_path)
-    assert payload["tokens"] > 0
+    assert "tokens" not in payload
+    assert payload["bytes"] > 0
 
 
 def test_removed_experimental_commands_are_not_present():

@@ -1,119 +1,56 @@
-from __future__ import annotations
-
-import json
-import tempfile
 from pathlib import Path
-
-import tiktoken
-
-from bn.output import DEFAULT_SPILL_TOKEN_LIMIT
-from bn.output import write_output
+import json
+import pytest
+import bn.output as output
 
 
-TOKENIZER = "o200k_base"
+@pytest.mark.parametrize("fmt", ["json", "ndjson"])
+def test_structured_output_never_auto_spills(fmt, monkeypatch):
+    monkeypatch.setattr(output, "_token_encoding", lambda: pytest.fail("must stay offline"))
+    value = [{"text": "x" * 50000}]
+    result = output.write_output_result(value, fmt=fmt, out_path=None, stem="test")
+    assert not result.spilled
+    assert json.loads(result.rendered) == (value if fmt == "json" else value[0])
 
 
-def _token_count(text: str) -> int:
-    return len(tiktoken.get_encoding(TOKENIZER).encode(text))
+def test_explicit_structured_spill(tmp_path, monkeypatch):
+    monkeypatch.setattr(output, "spill_root", lambda: tmp_path)
+    result = output.write_output_result({"x": "y" * 100}, fmt="json", out_path=None,
+                                      stem="test", allow_spill=True, spill_byte_limit=20)
+    assert result.spilled
+    assert json.loads(Path(result.artifact["artifact_path"]).read_text()) == {"x": "y" * 100}
 
 
-def test_default_spill_token_limit_is_10k():
-    assert DEFAULT_SPILL_TOKEN_LIMIT == 10_000
+def test_byte_limit_and_no_spill(tmp_path, monkeypatch):
+    monkeypatch.setattr(output, "spill_root", lambda: tmp_path)
+    monkeypatch.setattr(output, "_token_encoding", lambda: pytest.fail("must stay offline"))
+    for allow in (True, False):
+        result = output.write_output_result("é" * 10, fmt="text", out_path=None,
+                                          stem="test", allow_spill=allow, spill_byte_limit=15)
+        assert result.spilled == allow
 
 
-def test_write_output_renders_small_payload_without_spill(tmp_path, monkeypatch):
-    monkeypatch.setenv("BN_CACHE_DIR", str(tmp_path))
-
-    rendered = write_output({"ok": True}, fmt="json", out_path=None, stem="small")
-
-    payload = json.loads(rendered)
-    assert payload["ok"] is True
-
-
-def test_write_output_spills_large_payload(tmp_path, monkeypatch):
-    monkeypatch.setenv("BN_CACHE_DIR", str(tmp_path))
-    payload = {"data": [f"item-{index:04d}" for index in range(1000)]}
-
-    rendered = write_output(
-        payload,
-        fmt="json",
-        out_path=None,
-        stem="large",
-        spill_token_limit=256,
-    )
-
-    envelope = json.loads(rendered)
-    artifact_root = tempfile.gettempdir()
-    assert envelope["artifact_path"].startswith(artifact_root)
-    artifact_text = Path(envelope["artifact_path"]).read_text()
-    assert envelope["tokenizer"] == TOKENIZER
-    assert envelope["tokens"] == _token_count(artifact_text)
+def test_out_is_offline_by_default_and_token_failure_is_nonfatal(tmp_path, monkeypatch):
+    def unavailable():
+        raise ImportError("no tiktoken")
+    monkeypatch.setattr(output, "_token_encoding", unavailable)
+    for count in (False, True):
+        result = output.write_output_result("hello", fmt="text", out_path=tmp_path / "out.txt",
+                                          stem="test", count_tokens=count)
+        assert "tokens" not in result.artifact
+        assert ("token_count_warning" in result.artifact) == count
+        assert (tmp_path / "out.txt").read_text() == "hello\n"
 
 
-def test_write_output_can_disable_automatic_spill(tmp_path, monkeypatch):
-    monkeypatch.setenv("BN_CACHE_DIR", str(tmp_path))
-    payload = "x" * 1000
-
-    rendered = write_output(
-        payload,
-        fmt="text",
-        out_path=None,
-        stem="streamed",
-        spill_token_limit=1,
-        allow_spill=False,
-    )
-
-    assert rendered == payload + "\n"
-
-
-def test_write_output_spills_text_payload_with_txt_suffix(tmp_path, monkeypatch):
-    monkeypatch.setenv("BN_CACHE_DIR", str(tmp_path))
-    payload = "\n".join(f"line {index} with distinctive content" for index in range(1000))
-
-    rendered = write_output(
-        payload,
-        fmt="text",
-        out_path=None,
-        stem="large-text",
-        spill_token_limit=256,
-    )
-
-    envelope = json.loads(rendered)
-    assert envelope["artifact_path"].endswith(".txt")
-
-
-def test_write_output_uses_token_limit_not_byte_limit(tmp_path, monkeypatch):
-    monkeypatch.setenv("BN_CACHE_DIR", str(tmp_path))
-    payload = "x" * 1000
-    token_limit = _token_count(payload + "\n") + 1
-
-    rendered = write_output(
-        payload,
-        fmt="text",
-        out_path=None,
-        stem="byte-heavy",
-        spill_token_limit=token_limit,
-    )
-
-    assert rendered == payload + "\n"
-
-
-def test_write_output_reports_exact_tokens_for_explicit_out_path(tmp_path, monkeypatch):
-    monkeypatch.setenv("BN_CACHE_DIR", str(tmp_path))
-
-    out_path = tmp_path / "artifacts" / "payload.json"
-    rendered = write_output(
-        {"message": "token-aware output"},
-        fmt="json",
-        out_path=out_path,
-        stem="explicit-out",
-    )
-
-    envelope = json.loads(rendered)
-    artifact_text = out_path.read_text()
-    assert envelope["artifact_path"] == str(out_path)
-    assert envelope["tokenizer"] == TOKENIZER
-    assert envelope["tokens"] == _token_count(artifact_text)
+def test_optional_token_count_treats_special_tokens_as_text(tmp_path, monkeypatch):
+    class Encoder:
+        def encode(self, text, *, disallowed_special):
+            assert disallowed_special == ()
+            return [1, 2]
+    monkeypatch.setattr(output, "_token_encoding", lambda: Encoder())
+    result = output.write_output_result("<|endoftext|>", fmt="text", out_path=tmp_path / "out",
+                                      stem="test", count_tokens=True)
+    assert result.artifact["tokens"] == 2
 
 
 def test_concurrent_spills_preserve_distinct_payloads(tmp_path, monkeypatch):
@@ -121,16 +58,11 @@ def test_concurrent_spills_preserve_distinct_payloads(tmp_path, monkeypatch):
     import hashlib
     import bn.output as output
 
-    class Encoder:
-        def encode(self, text):
-            return list(text)
-
     monkeypatch.setattr(output, "spill_root", lambda: tmp_path)
-    monkeypatch.setattr(output, "_token_encoding", lambda: Encoder())
     def write(index):
         payload = f"function {index}\n"
         result = output.write_output_result(payload, fmt="text", out_path=None,
-                                            stem="decompile", spill_token_limit=1)
+                                            stem="decompile", spill_byte_limit=1)
         return payload, result.artifact
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(write, range(32)))

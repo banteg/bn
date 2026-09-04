@@ -9,9 +9,10 @@ authors = [
     { name = "banteg", email = "4562643+banteg@users.noreply.github.com" }
 ]
 requires-python = ">=3.12"
-dependencies = [
-    "tiktoken>=0.12.0",
-]
+dependencies = []
+
+[project.optional-dependencies]
+tokens = ["tiktoken>=0.12.0"]
 
 [project.urls]
 Repository = "https://github.com/banteg/bn"

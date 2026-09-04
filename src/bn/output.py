@@ -10,14 +10,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import tiktoken
-
 from .paths import spill_root
 
 
-DEFAULT_SPILL_TOKEN_LIMIT = 10_000
-# `tiktoken` does not currently resolve the dotted `gpt-5.4` alias directly.
-GPT_5_4_TOKENIZER = "o200k_base"
+DEFAULT_SPILL_BYTE_LIMIT = 40_000
+TOKENIZER = "o200k_base"
 
 
 @dataclass(frozen=True)
@@ -70,8 +67,10 @@ def _spill_path(stem: str, suffix: str) -> Path:
 
 
 @functools.cache
-def _token_encoding() -> tiktoken.Encoding:
-    return tiktoken.get_encoding(GPT_5_4_TOKENIZER)
+def _token_encoding():
+    import tiktoken
+
+    return tiktoken.get_encoding(TOKENIZER)
 
 
 def _artifact_payload(
@@ -79,19 +78,25 @@ def _artifact_payload(
     artifact_path: Path,
     fmt: str,
     encoded: bytes,
-    token_count: int,
+    count_tokens: bool,
     value: Any,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "ok": True,
         "artifact_path": str(artifact_path),
         "format": fmt,
         "bytes": len(encoded),
-        "tokens": token_count,
-        "tokenizer": GPT_5_4_TOKENIZER,
+
         "sha256": hashlib.sha256(encoded).hexdigest(),
         "summary": _summary(value),
     }
+    if count_tokens:
+        try:
+            payload["tokens"] = len(_token_encoding().encode(encoded.decode("utf-8"), disallowed_special=()))
+            payload["tokenizer"] = TOKENIZER
+        except Exception as exc:
+            payload["token_count_warning"] = f"Token count unavailable: {exc}. Install bn-cli[tokens] for exact counts."
+    return payload
 
 
 def _artifact_envelope(payload: dict[str, Any]) -> str:
@@ -104,12 +109,14 @@ def write_output_result(
     fmt: str,
     out_path: Path | None,
     stem: str,
-    spill_token_limit: int = DEFAULT_SPILL_TOKEN_LIMIT,
-    allow_spill: bool = True,
+    spill_byte_limit: int = DEFAULT_SPILL_BYTE_LIMIT,
+    allow_spill: bool | None = None,
+    count_tokens: bool = False,
 ) -> OutputWriteResult:
     rendered = render_value(value, fmt)
     encoded = rendered.encode("utf-8")
-    token_count = len(_token_encoding().encode(rendered))
+    if allow_spill is None:
+        allow_spill = fmt == "text"
 
     if out_path is not None:
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -118,7 +125,7 @@ def write_output_result(
             artifact_path=out_path,
             fmt=fmt,
             encoded=encoded,
-            token_count=token_count,
+            count_tokens=count_tokens,
             value=value,
         )
         return OutputWriteResult(
@@ -127,7 +134,7 @@ def write_output_result(
             spilled=False,
         )
 
-    if not allow_spill or token_count <= spill_token_limit:
+    if not allow_spill or len(encoded) <= spill_byte_limit:
         return OutputWriteResult(rendered=rendered)
 
     suffix = ".ndjson" if fmt == "ndjson" else ".txt" if fmt == "text" else ".json"
@@ -137,7 +144,7 @@ def write_output_result(
         artifact_path=spill_path,
         fmt=fmt,
         encoded=encoded,
-        token_count=token_count,
+        count_tokens=count_tokens,
         value=value,
     )
     return OutputWriteResult(
@@ -153,14 +160,16 @@ def write_output(
     fmt: str,
     out_path: Path | None,
     stem: str,
-    spill_token_limit: int = DEFAULT_SPILL_TOKEN_LIMIT,
-    allow_spill: bool = True,
+    spill_byte_limit: int = DEFAULT_SPILL_BYTE_LIMIT,
+    allow_spill: bool | None = None,
+    count_tokens: bool = False,
 ) -> str:
     return write_output_result(
         value,
         fmt=fmt,
         out_path=out_path,
         stem=stem,
-        spill_token_limit=spill_token_limit,
+        spill_byte_limit=spill_byte_limit,
         allow_spill=allow_spill,
+        count_tokens=count_tokens,
     ).rendered
