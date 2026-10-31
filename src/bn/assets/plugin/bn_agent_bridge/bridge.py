@@ -16,7 +16,7 @@ from typing import Any, Callable
 import binaryninja as bn
 from binaryninja.plugin import PluginCommand
 
-from .errors import OperationFailure
+from .errors import OperationFailure, error_details
 from .paths import PLUGIN_NAME, bridge_registry_path, bridge_socket_path
 from .python_exec import byte_order_for_view, execute_python
 from .server import BridgeHandler, ThreadedUnixServer
@@ -24,6 +24,7 @@ from .targets import TargetManager, ui
 from .version import PROTOCOL_VERSION, VERSION, build_id_for_file
 
 
+DISCOVERY_WAIT_SECONDS = 2.0
 PLUGIN_BUILD_ID = build_id_for_file(Path(__file__).resolve())
 
 
@@ -47,7 +48,8 @@ class BinaryNinjaBridge:
         self.registry_path = bridge_registry_path()
         self._server: ThreadedUnixServer | None = None
         self._thread: threading.Thread | None = None
-        self._request_lock = threading.RLock()
+        self._request_slot = threading.Condition()
+        self._active_request: tuple[str, float] | None = None
 
     def start(self):  # pragma: no cover - requires GUI runtime
         self.socket_path.parent.mkdir(parents=True, exist_ok=True)
@@ -105,27 +107,29 @@ class BinaryNinjaBridge:
                     f"Unknown operation: {op}",
                     requested={"op": op},
                 )
-            with self._request_lock:
+            with self._request_slot:
+                if op == "doctor" and self._active_request is not None:
+                    return _json_response(ok=True, result=self._doctor(active=self._activity()))
+                # Discovery is a probe. Analysis and edits may legitimately queue for a long job.
+                wait = DISCOVERY_WAIT_SECONDS if op == "list_targets" else None
+                if not self._request_slot.wait_for(lambda: self._active_request is None, timeout=wait):
+                    active = self._activity()
+                    raise OperationFailure(
+                        "bridge_busy",
+                        f"Bridge busy with {active['operation']} ({active['elapsed_seconds']}s). "
+                        "This request did not start. Retry after the active operation finishes.",
+                        observed={"active_request": active},
+                    )
+                self._active_request = (op, time.monotonic())
+            try:
                 result = handler(params, target)
+            finally:
+                with self._request_slot:
+                    self._active_request = None
+                    self._request_slot.notify_all()
             return _json_response(ok=True, result=result)
-        except OperationFailure as exc:
-            return _json_response(
-                ok=False,
-                error={
-                    "code": exc.status,
-                    "message": exc.message,
-                    "requested": exc.requested,
-                    "observed": exc.observed,
-                },
-            )
         except Exception as exc:
-            return _json_response(
-                ok=False,
-                error={
-                    "code": type(exc).__name__,
-                    "message": str(exc),
-                },
-            )
+            return _json_response(ok=False, error=error_details(exc))
 
     def _operation_handlers(
         self,
@@ -245,7 +249,14 @@ class BinaryNinjaBridge:
             },
         }
 
-    def _doctor(self):
+    def _activity(self):
+        # Read under _request_slot so the operation and elapsed time describe the same request.
+        if self._active_request is None:
+            return None
+        operation, started = self._active_request
+        return {"operation": operation, "elapsed_seconds": round(time.monotonic() - started, 3)}
+
+    def _doctor(self, *, active=None):
         return {
             "plugin_name": PLUGIN_NAME,
             "plugin_version": VERSION,
@@ -253,7 +264,9 @@ class BinaryNinjaBridge:
             "plugin_build_id": PLUGIN_BUILD_ID,
             "pid": os.getpid(),
             "socket_path": str(self.socket_path),
-            "targets": self.targets.refresh(),
+            "status": "busy" if active else "ok",
+            "active_request": active,
+            **({"targets": self.targets.refresh()} if active is None else {}),
             "capabilities": {
                 "operations": sorted(self._operation_handlers()),
                 "structured_errors": True,
@@ -263,34 +276,23 @@ class BinaryNinjaBridge:
             },
         }
 
-    def _target_info(self, selector: str | None):
-        bv = self.targets.resolve(selector)
-        record = None
-        for item in self.targets.refresh():
-            if item["active"] and selector in (None, "", "active"):
-                record = item
-                break
-            if selector and any(
-                self.targets._matches_record(target_record, selector)
-                for target_record in self.targets._records.values()
-                if target_record.target_id() == item["target_id"]
-            ):
-                record = item
-                break
-        return {
-            **(record or {}),
+    def _resolved_target(self, selector: str | None):
+        bv, record = self.targets.resolve_with_info(selector)
+        return bv, {
+            **record,
             "arch": str(getattr(bv, "arch", "")),
             "platform": str(getattr(bv, "platform", "")),
             "entry_point": hex(getattr(bv, "entry_point", 0)),
         }
 
+    def _target_info(self, selector: str | None):
+        _, info = self._resolved_target(selector)
+        return info
+
     def _refresh(self, selector: str | None):
-        bv = self._resolve_view(selector)
+        bv, info = self._resolved_target(selector)
         bv.update_analysis_and_wait()
-        return {
-            "refreshed": True,
-            "target": self._target_info(selector),
-        }
+        return {"refreshed": True, "target": info}
 
     def _resolve_view(self, selector: str | None):
         return self.targets.resolve(selector)
@@ -802,20 +804,36 @@ class BinaryNinjaBridge:
             yield var, False
 
     def _function_text(self, bv, func, *, view: str = "hlil", ssa: bool = False) -> str:
-        il_name = {"hlil": "hlil", "mlil": "mlil", "llil": "llil"}.get(view, "hlil")
+        status = "il_unavailable"
+        reason = "analysis unavailable"
         try:
-            il = getattr(func, il_name)
-            if ssa and hasattr(il, "ssa_form") and il.ssa_form is not None:
-                il = il.ssa_form
-            lines = []
-            for ins in il.instructions:
-                address = getattr(ins, "address", func.start)
-                lines.append(f"{int(address):08x}        {ins}")
-            if lines:
-                return "\n".join(lines)
-        except Exception:
-            pass
-        return str(func)
+            il = getattr(func, view, None)
+            if ssa and il is not None:
+                il = getattr(il, "ssa_form", None)
+            if il is not None:
+                lines = [
+                    f"{int(getattr(ins, 'address', func.start)):08x}        {ins}"
+                    for ins in il.instructions
+                ]
+                if lines:
+                    return "\n".join(lines)
+                status, reason = "il_empty", "empty instruction sequence"
+        except Exception as exc:
+            status, reason = "il_render_failed", f"{type(exc).__name__}: {exc}"
+
+        observed = {"function": func.name, "address": hex(func.start), "reason": reason}
+        with contextlib.suppress(Exception):
+            skip = getattr(func, "analysis_skip_reason", None)
+            if skip is not None:
+                observed["analysis_skip_reason"] = str(skip)
+                reason += f" (analysis skip reason: {skip})"
+        level = view.upper() + (" SSA" if ssa else "")
+        raise OperationFailure(
+            status,
+            f"{level} for {func.name} @ {hex(func.start)}: {reason}. "
+            "Inspect function analysis in Binary Ninja or use bn disasm.",
+            requested={"view": view, "ssa": ssa}, observed=observed,
+        )
 
     def _instruction_length(self, bv, address: int) -> int:
         arch = getattr(bv, "arch", None)
@@ -1583,6 +1601,9 @@ class BinaryNinjaBridge:
     def _refs_from(self, selector: str | None, identifier):
         bv = self._resolve_view(selector)
         func = self._find_function(bv, identifier, allow_containing=True)
+        return self._function_refs(bv, func)
+
+    def _function_refs(self, bv, func):
         code_refs = []
         data_refs = []
         seen_code: set[tuple[int, int]] = set()
@@ -1756,11 +1777,16 @@ class BinaryNinjaBridge:
                 max_results=max_results,
             )
 
+        skipped = 0
         for func in self._filtered_functions(bv):
             if time.monotonic() >= deadline:
                 timed_out = True
                 break
-            text = self._disasm_text(bv, func) if view == "disasm" else self._function_text(bv, func, view=view)
+            try:
+                text = self._disasm_text(bv, func) if view == "disasm" else self._function_text(bv, func, view=view)
+            except OperationFailure:
+                skipped += 1
+                continue
             for line in str(text).splitlines():
                 if not matches(line):
                     continue
@@ -1773,18 +1799,15 @@ class BinaryNinjaBridge:
                     }
                 )
                 if len(rows) >= max_results:
-                    return self._search_payload(
-                        rows,
-                        started=started,
-                        timed_out=False,
-                        max_results=max_results,
-                    )
-        return self._search_payload(
-            rows,
-            started=started,
-            timed_out=timed_out,
-            max_results=max_results,
-        )
+                    break
+            if len(rows) >= max_results:
+                break
+        result = self._search_payload(rows, started=started, timed_out=timed_out, max_results=max_results)
+        if skipped:
+            result["complete"] = False
+            result["skipped_functions"] = skipped
+            result["stopped_reason"] = result["stopped_reason"] or "unavailable IL"
+        return result
 
     def _il_contains_constant(self, value: Any, expected: int, seen: set[int]) -> bool:
         if isinstance(value, bool) or value is None:
@@ -2114,61 +2137,62 @@ class BinaryNinjaBridge:
         }
 
     def _bundle_request(self, selector: str | None, params: dict[str, Any]):
-        include = params.get("include")
-        self._bundle_sections(include)  # Validate once, before any reads.
+        sections = self._bundle_sections(params.get("include"))
+        bv, target = self._resolved_target(selector)
         if "identifiers" not in params:
-            return self._bundle_function(selector, params["identifier"], include=include)
-        # Pin the target once for the whole request, even when selector is "active".
-        target = self._target_info(selector)
-        pinned = target.get("target_id") or target.get("selector") or selector
+            result = self._bundle_function(bv, params["identifier"], sections)
+            if "section_errors" in result:
+                result["success"] = False
+            return {"target": target, **result}
+
         functions = []
         for identifier in dict.fromkeys(params["identifiers"]):
             try:
-                result = self._bundle_function(pinned, identifier, include=include)
-                result.pop("target", None)
-                functions.append({"identifier": identifier, "ok": True, **result})
+                result = self._bundle_function(bv, identifier, sections)
+                functions.append({"identifier": identifier, "ok": "section_errors" not in result, **result})
             except Exception as exc:
-                functions.append({"identifier": identifier, "ok": False,
-                                  "error": {"code": getattr(exc, "status", type(exc).__name__), "message": str(exc)}})
-        return {"target": target, "functions": functions,
-                "success": all(item["ok"] for item in functions)}
+                functions.append({"identifier": identifier, "ok": False, "error": error_details(exc)})
+        return {"target": target, "functions": functions, "success": all(item["ok"] for item in functions)}
 
     @staticmethod
     def _bundle_sections(include):
         available = {"decompile", "mlil", "llil", "disasm", "locals", "comments", "xrefs", "refs"}
-        sections = set(include) if include is not None else {"decompile", "disasm", "refs"}
+        sections = set(include) if include is not None else {"decompile", "disasm"}
         if sections == {"all"}:
             return available
         if not sections or sections - available:
             raise OperationFailure("invalid_sections", "Bundle sections: " + ", ".join(sorted(available)) + ", all")
         return sections
 
-    def _bundle_function(self, selector: str | None, identifier, *, include=None):
-        sections = self._bundle_sections(include)
-        bv = self._resolve_view(selector)
+    def _bundle_function(self, bv, identifier, sections):
         func = self._find_function(bv, identifier, allow_containing=True)
-        bundle = {
-            "target": self._target_info(selector),
-            "function": {"name": func.name, "address": hex(func.start),
-                         "raw_name": getattr(func, "raw_name", func.name), "type": str(func.type)},
+        bundle = {"function": {**self._function_entry(func), "type": str(func.type)}}
+        readers = {
+            "decompile": lambda: self._function_text(bv, func, view="hlil"),
+            "mlil": lambda: self._function_text(bv, func, view="mlil"),
+            "llil": lambda: self._function_text(bv, func, view="llil"),
+            "disasm": lambda: self._disasm_text(bv, func),
+            "locals": lambda: self._list_locals(func),
+            "comments": lambda: dict(sorted(self._comment_map(bv, func).items())),
+            "xrefs": lambda: self._xrefs_to_address(bv, func.start),
+            "refs": lambda: self._function_refs(bv, func),
         }
-        if "decompile" in sections:
-            text = self._function_text(bv, func, view="hlil")
-            bundle["decompile"] = text
-            bundle["warnings"] = self._render_warnings(text)
-        for view in ("mlil", "llil"):
-            if view in sections:
-                bundle.setdefault("il", {})[view] = self._function_text(bv, func, view=view)
-        if "disasm" in sections:
-            bundle["disassembly"] = self._disasm_text(bv, func)
-        if "locals" in sections:
-            bundle["locals"] = self._list_locals(func)
-        if "comments" in sections:
-            bundle["comments"] = dict(sorted(self._comment_map(bv, func).items()))
-        if "xrefs" in sections:
-            bundle["xrefs"] = self._xrefs_to_address(bv, func.start)
-        if "refs" in sections:
-            bundle["refs"] = self._refs_from(selector, func.start)
+        for section, read in readers.items():
+            if section not in sections:
+                continue
+            try:
+                value = read()
+            except Exception as exc:
+                bundle.setdefault("section_errors", {})[section] = error_details(exc)
+                continue
+            if section in ("mlil", "llil"):
+                bundle.setdefault("il", {})[section] = value
+            elif section == "disasm":
+                bundle["disassembly"] = value
+            else:
+                bundle[section] = value
+            if section == "decompile":
+                bundle["warnings"] = self._render_warnings(value)
         return bundle
 
     def _py_exec(self, selector: str | None, script: str):
@@ -2356,11 +2380,13 @@ class BinaryNinjaBridge:
     def _capture_function_snapshots(self, bv, functions):
         snapshots = {}
         for fn in functions:
-            snapshots[int(fn.start)] = {
-                "name": fn.name,
-                "address": hex(fn.start),
-                "text": self._function_text(bv, fn, view="hlil"),
-            }
+            # IL is supplementary to verification of the requested mutation.
+            snapshot = {"name": fn.name, "address": hex(fn.start), "text": ""}
+            try:
+                snapshot["text"] = self._function_text(bv, fn, view="hlil")
+            except OperationFailure as exc:
+                snapshot["il_error"] = error_details(exc)
+            snapshots[int(fn.start)] = snapshot
         return snapshots
 
     def _snippet_for_change(
@@ -2400,12 +2426,15 @@ class BinaryNinjaBridge:
         for address in sorted(set(before) | set(after)):
             old = before.get(address, {"text": ""})
             new = after.get(address, {"text": ""})
-            text_changed = old.get("text", "") != new.get("text", "")
+            old_text, new_text = old["text"], new["text"]
+            if "il_error" in old or "il_error" in new:
+                old_text = new_text = ""
+            text_changed = old_text != new_text
             name_changed = old.get("name") != new.get("name")
             diff = "\n".join(
                 difflib.unified_diff(
-                    old["text"].splitlines(),
-                    new["text"].splitlines(),
+                    old_text.splitlines(),
+                    new_text.splitlines(),
                     fromfile=f"before:{old.get('name', hex(address))}",
                     tofile=f"after:{new.get('name', hex(address))}",
                     lineterm="",
@@ -2427,8 +2456,11 @@ class BinaryNinjaBridge:
                     "diff": diff,
                 }
             )
+            for phase, snapshot in (("before", old), ("after", new)):
+                if "il_error" in snapshot:
+                    diffs[-1][f"{phase}_il_error"] = snapshot["il_error"]
             if text_changed and snippets_added < 3:
-                snippet = self._snippet_for_change(old.get("text", ""), new.get("text", ""))
+                snippet = self._snippet_for_change(old_text, new_text)
                 if snippet is not None:
                     diffs[-1].update(snippet)
                     snippets_added += 1

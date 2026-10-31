@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 from .output import write_output_result
 from .paths import plugin_install_dir, plugin_source_dir, skill_install_dir, skill_source_dir
-from .transport import BridgeError, _send_request_to_instance, list_instances, send_request
+from .transport import BridgeError, _send_request_to_instance, absent_bridge_error, list_instances, send_request
 from .version import PROTOCOL_VERSION, VERSION, build_id_for_file
 
 FAILED_MUTATION_STATUSES = {"unsupported", "verification_failed"}
@@ -92,6 +92,8 @@ class BnArgumentParser(argparse.ArgumentParser):
             formatter.add_arguments(group_actions)
             formatter.end_section()
 
+        if "--tokens" in self._option_string_actions:
+            formatter.add_text("Deprecated: --tokens requests optional exact artifact token counts.")
         formatter.add_text(self.epilog)
         return formatter.format_help()
 
@@ -153,7 +155,7 @@ def _common_io_options(
         )
     spill = parser.add_mutually_exclusive_group()
     spill.add_argument("--spill", action="store_true", help="Explicitly spill large structured output to an artifact")
-    parser.add_argument("--tokens", action="store_true", help="Include optional exact token counts in artifact metadata")
+    parser.add_argument("--tokens", action="store_true", help=argparse.SUPPRESS)
     spill.add_argument(
         "--no-spill",
         action="store_true",
@@ -197,6 +199,8 @@ def _render_result(
     if count_tokens:
         output_args["count_tokens"] = True
     result = write_output_result(value, **output_args)
+    if count_tokens:
+        print("warning: --tokens and the bn-cli[tokens] extra are deprecated in 0.16.", file=sys.stderr)
     if result.spilled and result.artifact and fmt == "text":
         label = spill_label or stem.replace("_", " ")
         artifact = result.artifact
@@ -564,10 +568,14 @@ def _render_target_list_text(value: Any) -> str:
         return _render_fallback_text(value)
     if not value:
         return "no targets"
-    return "\n\n".join(
-        _render_target_summary(item) if isinstance(item, dict) else _render_fallback_text(item)
-        for item in value
-    )
+    lines = []
+    for item in value:
+        selector = item["selector"]
+        active = " [active]" if item["active"] else ""
+        target_id = item["target_id"]
+        identity = f"  {target_id}" if target_id != selector else ""
+        lines.append(f"{selector}{active}{identity}  {item['filename']}")
+    return "\n".join(lines)
 
 
 def _render_target_info_text(value: Any) -> str:
@@ -749,7 +757,7 @@ def _render_doctor_text(value: Any) -> str:
     ]
     instances = list(value.get("instances") or [])
     if not instances:
-        lines.append("- none")
+        lines.extend(["- none", value["error"]["message"]])
         return "\n".join(lines)
 
     for item in instances:
@@ -757,7 +765,7 @@ def _render_doctor_text(value: Any) -> str:
             lines.append("- " + _render_fallback_text(item))
             continue
         doctor = item.get("doctor") if isinstance(item.get("doctor"), dict) else {}
-        status = "ok" if doctor and not doctor.get("error") else "error"
+        status = doctor["status"]
         lines.append(
             "- "
             + f"pid={item.get('pid', '<unknown>')} plugin={item.get('plugin_version', '<unknown>')} status={status}"
@@ -776,24 +784,10 @@ def _render_doctor_text(value: Any) -> str:
         error = doctor.get("error")
         if error:
             lines.append(f"  error: {error}")
-        sandbox_hint = item.get("sandbox_hint")
-        if sandbox_hint:
-            lines.append(f"  hint: {sandbox_hint}")
+        active = doctor.get("active_request")
+        if active:
+            lines.append(f"  active: {active['operation']} ({active['elapsed_seconds']}s)")
     return "\n".join(lines)
-
-
-def _sandbox_socket_hint(instance: Any, error: str) -> str | None:
-    if not os.environ.get("CODEX_SANDBOX"):
-        return None
-    lowered = error.lower()
-    if "operation not permitted" not in lowered and "permission denied" not in lowered:
-        return None
-    return (
-        "Codex sandbox blocked the Binary Ninja bridge socket at "
-        f"{instance.socket_path}. `bn` must run outside the Codex sandbox to reach the "
-        "live Binary Ninja GUI bridge. Add `prefix_rule(pattern=[\"bn\"], decision=\"allow\")` "
-        "to `~/.codex/rules/default.rules`, then restart Codex or reload rules."
-    )
 
 
 def _format_operation_result(item: dict[str, Any]) -> str:
@@ -1040,11 +1034,16 @@ def _doctor(args: argparse.Namespace) -> int:
                 "doctor",
                 params={},
                 target=None,
+                timeout=2.0,
+                connect_retries=1,
             )
-            ping = response["result"]
-        except Exception as exc:
-            ping = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-        sandbox_hint = _sandbox_socket_hint(instance, str(ping.get("error", "")))
+            ping = response.get("result")
+            if not isinstance(ping, dict) or ping.get("status") not in ("ok", "busy"):
+                raise BridgeError("Invalid doctor response. Reload the matching companion.", code="bridge_protocol_error")
+        except BridgeError as exc:
+            ping = {"error": str(exc), "code": exc.code, "status": "error"}
+            if exc.code in {"bridge_denied", "bridge_absent", "bridge_timeout"}:
+                ping["status"] = exc.code.removeprefix("bridge_")
 
         loaded_version = ping.get("plugin_version") if isinstance(ping, dict) else None
         loaded_build_id = ping.get("plugin_build_id") if isinstance(ping, dict) else None
@@ -1068,8 +1067,6 @@ def _doctor(args: argparse.Namespace) -> int:
             "started_at": instance.started_at,
             "doctor": ping,
         }
-        if sandbox_hint:
-            instance_info["sandbox_hint"] = sandbox_hint
         instances.append(instance_info)
 
     result = {
@@ -1080,10 +1077,15 @@ def _doctor(args: argparse.Namespace) -> int:
         "plugin_install_build_id": install_build_id,
         "instances": instances,
     }
+    status = next((item["doctor"]["status"] for item in instances if item["doctor"]["status"] != "ok"), "ok")
+    if not instances:
+        status = "absent"
+        result["error"] = absent_bridge_error().details
+    result["status"] = status
     if args.format == "text":
         result = _render_doctor_text(result)
     _render_direct_result(args, result, stem="doctor")
-    return 0
+    return 0 if status == "ok" else 2
 
 
 def _plugin_install(args: argparse.Namespace) -> int:
@@ -1712,6 +1714,8 @@ def _schema_action(action: argparse.Action) -> dict[str, Any]:
         "dest": action.dest,
         "required": bool(getattr(action, "required", False)),
     }
+    if action.dest == "tokens":
+        value["deprecated"] = True
     if action.option_strings:
         value["options"] = list(action.option_strings)
     else:
@@ -2033,7 +2037,7 @@ def build_parser() -> argparse.ArgumentParser:
     _common_io_options(bundle_function, default_format="json")
     _target_option(bundle_function, required=False)
     bundle_function.add_argument("identifiers", nargs="+")
-    bundle_function.add_argument("--include", help="Comma-separated sections (default: decompile,disasm,refs); all for full export")
+    bundle_function.add_argument("--include", help="Comma-separated sections (default: decompile,disasm); all for full export")
     bundle_function.set_defaults(handler=_bundle_function)
 
     py = subparsers.add_parser("py", help="Execute Python inside Binary Ninja")

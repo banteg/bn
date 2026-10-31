@@ -18,10 +18,12 @@ bn disasm 0x401234 --count 20
 bn disasm 0x401234 --end 0x401280
 bn xrefs player_update
 bn refs player_update
-bn bundle function player_update projectile_update --include decompile,disasm --out /tmp/functions.json
+bn bundle function player_update projectile_update --out /tmp/functions.json
 ```
 
-`function info` is a compact summary; add `--locals` or use `local list` for full variable details. Bundles default to decompile, disassembly, and outbound references. `--include all` exports every section without duplicating HLIL. Multiple-function bundles retain successful reads alongside per-function errors and exit nonzero if any fail.
+`function info` is a compact summary. Add `--locals` or use `local list` for full variable details. Bundles default to decompilation and disassembly. Add `refs` to `--include` for outbound references or use `--include all`. A partial bundle exits nonzero and keeps successful sections. Inspect `section_errors` and, for multiple functions, each row's `ok` field.
+
+When filenames collide, use the full target ID beside the intended path. For `bridge_denied`, retry the authorized command with socket access. For `bridge_busy`, `bn doctor` reports which operation is running and for how long.
 
 Linear `disasm --count/--end` works without a containing function and reports where decoding stops. `--end` is exclusive. For windows in an analyzed function use `--before-instructions/--after-instructions`. With `--match`, `--before/--after` always count text lines; without `--match`, disassembly also accepts them as legacy instruction-window aliases.
 
@@ -33,7 +35,6 @@ Use `bn schema disasm` or `bn schema function info` for scoped argument discover
 - Text over 40,000 bytes spills to a unique file, with a short preview on stdout and metadata on stderr. Use `--no-spill` for text pipelines.
 - `--out <path>` writes the full result and returns an artifact envelope with size and hash.
 - `--match <regex>` filters text before spill accounting. `--before/--after` supply matching-line context.
-- Optional `--tokens` adds artifact token counts if the `bn-cli[tokens]` extra and tokenizer are available. Normal output needs neither.
 
 ## Python is a first-class analysis path
 
@@ -42,7 +43,10 @@ Use BN directly for custom analysis. `bn py exec` remains an alias. Pipe multili
 ```bash
 bn py <<'PY'
 f = function("player_update")
-result = {"address": hex(f.start), "hlil_count": sum(1 for _ in f.hlil.instructions)}
+il = f.hlil
+if il is None:
+    raise ValueError(f"HLIL unavailable for {f.name}: {f.analysis_skip_reason}")
+result = {"address": hex(f.start), "hlil_count": sum(1 for _ in il.instructions)}
 PY
 ```
 

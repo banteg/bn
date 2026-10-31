@@ -402,12 +402,7 @@ def test_refresh_updates_analysis_and_returns_target_info(monkeypatch):
     instance = bridge.BinaryNinjaBridge()
     bv = _FakeMutationBV()
 
-    monkeypatch.setattr(instance, "_resolve_view", lambda selector: bv)
-    monkeypatch.setattr(
-        instance,
-        "_target_info",
-        lambda selector: {"selector": "SnailMail_unwrapped.exe.bndb"},
-    )
+    monkeypatch.setattr(instance, "_resolved_target", lambda selector: (bv, {"selector": "SnailMail_unwrapped.exe.bndb"}))
 
     result = instance._refresh("active")
 
@@ -491,7 +486,7 @@ def test_target_manager_requires_explicit_target_for_multiple_views(monkeypatch)
         {"target_id": "123:1:7", "selector": "one.bndb", "active": True},
         {"target_id": "123:2:8", "selector": "two.bndb", "active": False},
     ]
-    monkeypatch.setattr(manager, "refresh", lambda: targets)
+    monkeypatch.setattr(manager, "_snapshot", lambda: [(object(), target) for target in targets])
 
     with pytest.raises(bridge.OperationFailure) as exc_info:
         manager.resolve(None)
@@ -507,13 +502,12 @@ def test_target_manager_only_follows_active_view_when_explicit(monkeypatch):
     active_view = object()
     monkeypatch.setattr(
         manager,
-        "refresh",
+        "_snapshot",
         lambda: [
-            {"target_id": "123:1:7", "selector": "one.bndb", "active": True},
-            {"target_id": "123:2:8", "selector": "two.bndb", "active": False},
+            (active_view, {"target_id": "123:1:7", "selector": "one.bndb", "active": True}),
+            (object(), {"target_id": "123:2:8", "selector": "two.bndb", "active": False}),
         ],
     )
-    monkeypatch.setattr(manager, "_default_view", lambda: active_view)
 
     assert manager.resolve("active") is active_view
 
@@ -1552,13 +1546,12 @@ def test_selective_bundle_skips_unrequested_analysis(monkeypatch):
     module = _load_bridge(monkeypatch)
     instance = module.BinaryNinjaBridge()
     function = _FakeFunction(0x401000, "small")
-    monkeypatch.setattr(instance, "_resolve_view", lambda _: object())
+    monkeypatch.setattr(instance, "_resolved_target", lambda _: (object(), {"selector": "test"}))
     monkeypatch.setattr(instance, "_find_function", lambda *a, **k: function)
-    monkeypatch.setattr(instance, "_target_info", lambda _: {"selector": "test"})
     monkeypatch.setattr(instance, "_function_text", lambda *a, **k: "return 1")
-    for name in ("_list_locals", "_disasm_text", "_refs_from", "_comment_map", "_xrefs_to_address"):
+    for name in ("_list_locals", "_disasm_text", "_function_refs", "_comment_map", "_xrefs_to_address"):
         monkeypatch.setattr(instance, name, lambda *a, **k: pytest.fail("unrequested analysis"))
-    result = instance._bundle_function("test", "small", include=["decompile"])
+    result = instance._bundle_request("test", {"identifier": "small", "include": ["decompile"]})
     assert result["decompile"] == "return 1"
     assert set(result) == {"target", "function", "decompile", "warnings"}
 
@@ -1567,15 +1560,16 @@ def test_multi_bundle_deduplicates_and_preserves_partial_results(monkeypatch):
     module = _load_bridge(monkeypatch)
     instance = module.BinaryNinjaBridge()
     calls = []
-    monkeypatch.setattr(instance, "_target_info", lambda _: {"selector": "test", "target_id": "fixed"})
-    def bundle(selector, identifier, **kwargs):
-        calls.append((selector, identifier))
+    view = object()
+    monkeypatch.setattr(instance, "_resolved_target", lambda _: (view, {"target_id": "fixed"}))
+    def bundle(bv, identifier, sections):
+        calls.append((bv, identifier))
         if identifier == "missing":
             raise ValueError("not found")
-        return {"target": {}, "function": {"name": identifier}}
+        return {"function": {"name": identifier}}
     monkeypatch.setattr(instance, "_bundle_function", bundle)
     result = instance._bundle_request("active", {"identifiers": ["a", "missing", "a", "b"]})
-    assert calls == [("fixed", "a"), ("fixed", "missing"), ("fixed", "b")]
+    assert calls == [(view, "a"), (view, "missing"), (view, "b")]
     assert [r["ok"] for r in result["functions"]] == [True, False, True]
     assert result["success"] is False
 
@@ -1606,3 +1600,208 @@ def test_linear_disassembly_does_not_cross_exclusive_end(monkeypatch):
     result = instance._disasm(None, "0x1000", end="0x1001")
     assert result["instructions"] == []
     assert result["stopped_reason"] == "undecodable"
+
+
+def test_new_duplicate_target_cannot_redirect_a_mutation(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+    first, second = _FakeMutationBV(), _FakeMutationBV()
+    first.file = types.SimpleNamespace(filename="/amd64/Harvest", session_id=1)
+    second.file = types.SimpleNamespace(filename="/i386/Harvest", session_id=2)
+    views = [first]
+    targets = sys.modules[f"{bridge.__package__}.targets"]
+    monkeypatch.setattr(targets, "_collect_open_views", lambda: list(views))
+    monkeypatch.setattr(targets, "_active_binary_view", lambda: views[-1])
+    manager = instance.targets
+    first_id = manager.refresh()[0]["target_id"]
+    assert manager.resolve(None) is manager.resolve("Harvest") is first
+
+    views.append(second)
+    rows = manager.refresh()
+    response = instance.dispatch({
+        "protocol_version": PROTOCOL_VERSION, "op": "rename_symbol", "target": "Harvest",
+        "params": {"identifier": "0x401000", "new_name": "wrong_view"},
+    })
+    error = response["error"]
+    assert error["code"] == "ambiguous_target"
+    assert error["observed"]["targets"] == rows
+    for row in rows:
+        assert row["selector"] == row["target_id"]
+        assert row["target_id"] in error["message"] and row["filename"] in error["message"]
+    assert first.events == second.events == []
+    assert manager.resolve(first_id) is manager.resolve("/amd64/Harvest") is first
+    assert manager.resolve("active") is manager.resolve(rows[1]["view_id"]) is second
+
+    second.file.filename = first.file.filename
+    with pytest.raises(bridge.OperationFailure, match="Ambiguous target"):
+        manager.resolve(first.file.filename)
+
+
+@pytest.mark.parametrize(("mode", "code"), [
+    ("missing", "il_unavailable"), ("empty", "il_empty"), ("broken", "il_render_failed"),
+    ("ssa", "il_unavailable"),
+])
+def test_requested_il_reports_why_it_could_not_be_read(monkeypatch, mode, code):
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+    fn = _FakeFunction(0x401000, "sample")
+    fn.analysis_skip_reason = "FunctionTooLarge"
+    fn.hlil = None
+    if mode in ("empty", "ssa"):
+        fn.hlil = types.SimpleNamespace(instructions=[] if mode == "empty" else ["ret"], ssa_form=None)
+    if mode == "broken":
+        def broken_instructions():
+            yield "partial"
+            raise ValueError("bad instruction")
+        fn.hlil = types.SimpleNamespace(instructions=broken_instructions())
+    monkeypatch.setattr(instance, "_resolve_view", lambda _: _FakeBV(functions=[fn]))
+    params = {"identifier": "sample"}
+    op = "decompile"
+    if mode == "ssa":
+        op = "il"
+        params.update(view="hlil", ssa=True)
+    response = instance.dispatch({"protocol_version": PROTOCOL_VERSION, "op": op, "params": params})
+    assert response["ok"] is False
+    error = response["error"]
+    assert error["code"] == code
+    assert error["requested"] == {"view": "hlil", "ssa": mode == "ssa"}
+    assert error["observed"]["address"] == "0x401000"
+    assert error["observed"]["analysis_skip_reason"] == "FunctionTooLarge"
+    assert "sample" in error["message"]
+    if mode == "broken":
+        assert "bad instruction" in error["message"]
+
+
+@pytest.mark.parametrize("count", [1, 36])
+@pytest.mark.parametrize("include_refs", [False, True])
+def test_bundle_resolves_view_once_and_preserves_partial_sections(monkeypatch, count, include_refs):
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+    functions = [_FakeFunction(0x401000 + i, f"fn_{i}") for i in range(count)]
+    functions[0].hlil = None
+    for fn in functions[1:]:
+        fn.hlil = types.SimpleNamespace(instructions=["first", "second"])
+    view = _FakeBV(functions=functions)
+    view.file = types.SimpleNamespace(filename="/one/app.bndb", session_id=1)
+    other = _FakeBV()
+    other.file = types.SimpleNamespace(filename="/two/app.bndb", session_id=2)
+    collections = []
+
+    def collect():
+        collections.append(True)
+        return [view, other]
+
+    targets = sys.modules[f"{bridge.__package__}.targets"]
+    monkeypatch.setattr(targets, "_collect_open_views", collect)
+    monkeypatch.setattr(targets, "_active_binary_view", lambda: view if len(collections) == 1 else other)
+    monkeypatch.setattr(instance, "_disasm_text", lambda bv, fn: f"{bv.file.filename}/{fn.name}")
+    if not include_refs:
+        monkeypatch.setattr(instance, "_function_refs", lambda *args: pytest.fail("refs were not requested"))
+    params = {"identifier": functions[0].name} if count == 1 else {"identifiers": [f.name for f in functions]}
+    if include_refs:
+        params["include"] = ["decompile", "disasm", "refs"]
+    result = instance._bundle_request("active", params)
+    assert len(collections) == 1
+    assert result["target"]["filename"] == view.file.filename
+    assert result["success"] is False
+    rows = [result] if count == 1 else result["functions"]
+    assert rows[0]["section_errors"]["decompile"]["code"] == "il_unavailable"
+    assert "decompile" not in rows[0]
+    for row, fn in zip(rows, functions, strict=True):
+        assert row["disassembly"] == f"/one/app.bndb/{fn.name}"
+        assert ("refs" in row) is include_refs
+        if count > 1:
+            assert row["ok"] is (fn is not functions[0])
+        if fn is not functions[0]:
+            assert row["decompile"].splitlines() == [f"{fn.start:08x}        first", f"{fn.start:08x}        second"]
+
+
+def test_busy_bridge_reports_activity_without_waiting_for_python(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+    entered, release = Event(), Event()
+    views_read = []
+    monkeypatch.setattr(bridge, "DISCOVERY_WAIT_SECONDS", 0)
+    monkeypatch.setattr(instance.targets, "refresh", lambda: views_read.append(True) or [])
+
+    def long_python(selector, script):
+        entered.set()
+        assert release.wait(5)
+        raise ValueError("script failed")
+
+    monkeypatch.setattr(instance, "_py_exec", long_python)
+
+    def dispatch(op, **params):
+        return instance.dispatch({"protocol_version": PROTOCOL_VERSION, "op": op, "params": params})
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        running = pool.submit(dispatch, "py_exec", script="pass")
+        try:
+            assert entered.wait(2)
+            occupied = dispatch("doctor")["result"]
+            assert occupied["status"] == "busy"
+            active = occupied["active_request"]
+            assert active["operation"] == "py_exec" and active["elapsed_seconds"] >= 0
+            assert "targets" not in occupied and not views_read
+            denied = dispatch("list_targets")["error"]
+            assert denied["code"] == "bridge_busy"
+            assert denied["observed"]["active_request"]["operation"] == "py_exec"
+            assert not views_read
+            # Ordinary reads remain queued behind analysis and run when it finishes.
+            monkeypatch.setattr(instance, "_function_info", lambda *args, **kwargs: {"name": "queued"})
+            queued = pool.submit(dispatch, "function_info", identifier="queued")
+        finally:
+            release.set()
+        assert running.result()["error"]["message"] == "script failed"
+        assert queued.result()["result"]["name"] == "queued"
+    idle = dispatch("doctor")["result"]
+    assert idle["status"] == "ok" and idle["active_request"] is None
+    assert idle["targets"] == [] and views_read == [True]
+
+
+def test_target_ids_survive_fresh_gui_wrappers(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    targets = sys.modules[f"{bridge.__package__}.targets"]
+
+    class ViewWrapper:
+        file = types.SimpleNamespace(filename="/foo/app.bndb", session_id=7)
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __eq__(self, other):
+            return isinstance(other, ViewWrapper) and self.handle == other.handle
+
+        def __hash__(self):
+            return hash(self.handle)
+
+    monkeypatch.setattr(targets, "_collect_open_views", lambda: [ViewWrapper(1), ViewWrapper(2)])
+    monkeypatch.setattr(targets, "_active_binary_view", lambda: ViewWrapper(2))
+    manager = bridge.TargetManager()
+    rows = manager.refresh()
+    assert len(rows) == 2
+    assert [row["active"] for row in rows] == [False, True]
+    assert manager.resolve(rows[0]["target_id"]) == ViewWrapper(1)
+    assert manager.resolve_with_info("active")[1] == rows[1]
+
+
+def test_unavailable_il_does_not_hide_later_search_results_or_fake_a_mutation_diff(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    instance = bridge.BinaryNinjaBridge()
+    skipped = _FakeFunction(0x401000, "skipped")
+    readable = _FakeFunction(0x402000, "readable")
+    readable.hlil = types.SimpleNamespace(instructions=["return 1"])
+    view = _FakeBV(functions=[skipped, readable])
+    monkeypatch.setattr(instance, "_resolve_view", lambda _: view)
+    search = instance._search_text(None, "return", view="hlil", regex=False, max_results=10)
+    assert not search["complete"] and search["skipped_functions"] == 1
+    assert [row["function"] for row in search["results"]] == ["readable"]
+
+    before = instance._capture_function_snapshots(view, [readable])
+    readable.hlil = None
+    after = instance._capture_function_snapshots(view, [readable])
+    diff, = instance._diff_snapshots(before, after)
+    assert diff["diff"] == "" and not diff["changed"]
+    assert diff["after_il_error"]["code"] == "il_unavailable"
