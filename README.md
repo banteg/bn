@@ -21,7 +21,7 @@ bn target list
 bn decompile player_update --target crimsonland.exe.bndb
 ```
 
-With exactly one open view, omit `--target`. With several, use the returned selector; omission fails instead of silently choosing a GUI tab. `--target` works anywhere in the command, and `BN_TARGET` sets a shell default. Use `--target active` only to deliberately follow the selected GUI tab.
+With exactly one open view, omit `--target`. With several, copy the selector from the row with the intended file path. An ambiguous basename or path fails before the operation starts and lists the matching target IDs. `--target` works anywhere in the command, and `BN_TARGET` sets a shell default. Use `--target active` to deliberately follow the selected GUI tab.
 
 ## Common reads
 
@@ -74,16 +74,17 @@ Read commands default to text; mutations, setup, and bundles default to JSON.
 | `--spill` | Explicitly allow large structured results to become artifact envelopes |
 | `--no-spill` | Stream complete text for pipelines |
 | `--match <regex>` | Keep matching text with optional `--before`/`--after` context |
-| `--tokens` | Request optional token counts in artifact metadata |
 
-Text above 40,000 bytes spills to a unique file, leaving a short preview on stdout and metadata on stderr. Explicit structured spills return an envelope on stdout. Artifact metadata includes path, format, bytes, SHA-256, and a summary. Normal output needs no tokenizer; install the `bn-cli[tokens]` extra for exact artifact counts. Unavailable tokenization produces a warning without losing the artifact.
+Text above 40,000 bytes spills to a unique file, leaving a short preview on stdout and metadata on stderr. Explicit structured spills return an envelope on stdout. Artifact metadata includes path, format, bytes, SHA-256, and a summary. Version 0.16 deprecates `--tokens` and the `bn-cli[tokens]` extra. Existing callers can still request exact counts during the deprecation window.
 
 ```bash
 bn decompile player_update --match 'health|damage' --before 2 --after 3
-bn bundle function player_update projectile_update --include decompile,disasm --out /tmp/functions.json
+bn bundle function player_update projectile_update --out /tmp/functions.json
 ```
 
-Bundles default to decompile, disassembly, and outbound references. Select `decompile,mlil,llil,disasm,locals,comments,xrefs,refs`, or `all` for full export. HLIL appears only once. Multiple identifiers are deduplicated; per-function errors preserve successful reads and produce a nonzero exit status.
+Bundles pin one view for the whole request and default to decompilation and disassembly. Use `--include decompile,disasm,refs` for the 0.15 default or `--include all` for every section. Other available sections are `mlil,llil,locals,comments,xrefs`. A partial bundle retains successful sections, records failed sections in `section_errors`, sets `success` to false and exits nonzero. For multiple identifiers, check each row's `ok` field. With `--out`, the artifact contains these results.
+
+`decompile` and `il` report the requested function, IL level and available reason when Binary Ninja returns unavailable or empty IL, or raises while rendering it. Inspect the function's analysis state in Binary Ninja or read its native instructions with `disasm`.
 
 ## Python
 
@@ -92,11 +93,14 @@ Bundles default to decompile, disassembly, and outbound references. Select `deco
 ```bash
 bn py <<'PY'
 f = function("player_update")
-result = {"address": hex(f.start), "instructions": sum(1 for _ in f.hlil.instructions)}
+il = f.hlil
+if il is None:
+    raise ValueError(f"HLIL unavailable for {f.name}: {f.analysis_skip_reason}")
+result = {"address": hex(f.start), "instructions": sum(1 for _ in il.instructions)}
 PY
 ```
 
-Helpers include `address`, `function`, `functions_containing`, typed `read_u*`/`read_i*`, `read_ptr`, `read_f32`, `read_f64`, and `read_cstr`. BN iterators may need materialization. Both stdout and `result` are returned; non-JSON results use `repr` with a warning. Syntax errors are caught locally; runtime errors retain the in-process traceback. Raw Python writes do not inherit built-in mutation rollback or verification.
+Helpers include `address`, `function`, `functions_containing`, typed `read_u*`/`read_i*`, `read_ptr`, `read_f32`, `read_f64`, and `read_cstr`. BN iterators may need materialization. Both stdout and `result` are returned. Non-JSON results use `repr` with a warning. Syntax errors are caught locally. On a runtime error, text stderr includes the last 2,000 characters of captured stdout and the traceback. Structured errors retain the full captured stdout. Raw Python writes do not inherit built-in mutation rollback or verification.
 
 ## Mutations
 
@@ -113,7 +117,9 @@ Read back the relevant prototype/type and decompile after changes. `types show` 
 
 ## Troubleshooting and development
 
-`bn doctor` checks discovery, capabilities, installed code, and stale loaded plugin versions. If no targets appear, open a database and check that the companion is loaded. A socket `Operation not permitted` under Codex indicates sandbox access; run the authorized `bn` command outside that sandbox. Avoid reinstalling the plugin to fix a permission denial.
+`bn doctor` checks the companion with a two-second request deadline. It exits nonzero for an absent, denied, timed-out or busy bridge. While work is running, it reports the operation and elapsed time without querying GUI views. `target list` reports `bridge_busy` if it cannot start within two seconds. Other analysis and mutation requests queue normally and have no default execution deadline. A client timeout after submission can leave the operation running.
+
+An absent bridge (`bridge_absent`) needs a running GUI companion. If the bridge responds but lists no targets, open a database. For `bridge_denied` under Codex, retry the authorized command with bridge socket access.
 
 ```bash
 uv sync --locked

@@ -201,7 +201,7 @@ def test_send_request_wraps_socket_errors(tmp_path, monkeypatch):
 
     instance = BridgeInstance(
         pid=999,
-        socket_path=tmp_path / "missing.sock",
+        socket_path=Path("/tmp") / f"bn-missing-{uuid.uuid4().hex}.sock",
         registry_path=tmp_path / "missing.json",
         plugin_name="bn_agent_bridge",
         plugin_version="0.1.0",
@@ -210,8 +210,9 @@ def test_send_request_wraps_socket_errors(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("bn.transport.choose_instance", lambda: instance)
 
-    with pytest.raises(BridgeError, match="Failed to contact Binary Ninja bridge pid 999"):
+    with pytest.raises(BridgeError, match="No running Binary Ninja bridge") as error:
         send_request("doctor")
+    assert error.value.code == "bridge_absent"
 
 
 def test_send_request_retries_transient_connect_failures(tmp_path, monkeypatch):
@@ -353,8 +354,9 @@ def test_send_request_reports_timeout_waiting_for_response(tmp_path, monkeypatch
 
     monkeypatch.setattr("bn.transport.socket.socket", lambda *args, **kwargs: _FakeSocket())
 
-    with pytest.raises(BridgeError, match="Timed out waiting for Binary Ninja bridge pid 999"):
+    with pytest.raises(BridgeError, match="Execution may still be in progress") as error:
         send_request("ping", timeout=12.5)
+    assert error.value.code == "bridge_timeout"
 
 
 def test_list_instances_trusts_live_socket_even_with_stale_pid(tmp_path, monkeypatch):
@@ -421,3 +423,38 @@ def test_list_instances_reads_fixed_registry_path(tmp_path, monkeypatch):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_python_exception_preserves_full_structured_stdout_and_bounds_text(monkeypatch, capsys):
+    import bn.cli
+    from bn.transport import BridgeInstance
+
+    stdout = "first checkpoint" + "x" * 2500 + "\nlast checkpoint\n"
+    error = {"code": "python_error", "message": "Python execution failed",
+             "observed": {"stdout": stdout, "traceback": "Traceback: ValueError: probe"}}
+
+    class PythonErrorHandler(socketserver.StreamRequestHandler):
+        def handle(self):
+            self.rfile.readline()
+            self.wfile.write(json.dumps({"ok": False, "error": error}).encode())
+
+    path = Path("/tmp") / f"bn-python-error-{uuid.uuid4().hex}.sock"
+    instance = BridgeInstance(os.getpid(), path, path.with_suffix(".json"), "test", "0.16.0", None, {})
+    monkeypatch.setattr("bn.transport.choose_instance", lambda: instance)
+    with _Server(str(path), PythonErrorHandler) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            cmd = ["py", "exec", "--code", "raise ValueError('probe')"]
+            assert bn.cli.main(cmd) == 2
+            captured = capsys.readouterr()
+            assert captured.out == ""
+            assert "first checkpoint" not in captured.err
+            assert "last checkpoint\nTraceback" in captured.err
+            assert "earlier stdout omitted" in captured.err
+            assert bn.cli.main([*cmd, "--format", "json"]) == 2
+            assert json.loads(capsys.readouterr().err)["error"] == error
+        finally:
+            server.shutdown()
+            thread.join()
+            path.unlink(missing_ok=True)

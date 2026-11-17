@@ -4,6 +4,7 @@ import json
 import types
 
 import bn.cli
+import bn.transport
 import pytest
 from bn.version import PROTOCOL_VERSION
 
@@ -463,7 +464,8 @@ def test_target_list_text_format_renders_summary(monkeypatch, capsys):
     assert rc == 0
     output = capsys.readouterr().out
     assert "SnailMail_unwrapped.exe.bndb [active]" in output
-    assert "target: 123:1:7" in output
+    assert len(output.splitlines()) == 1
+    assert "123:1:7" in output and "/tmp/SnailMail_unwrapped.exe.bndb" in output
     assert '"selector"' not in output
 
 
@@ -1077,9 +1079,10 @@ def test_doctor_reports_stale_loaded_plugin(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(
         bn.cli,
         "_send_request_to_instance",
-        lambda instance, op, params=None, target=None: {
+        lambda instance, op, **kwargs: {
             "ok": True,
             "result": {
+                "status": "ok",
                 "plugin_name": "bn_agent_bridge",
                 "plugin_version": "0.4.0",
                 "plugin_build_id": "oldbuild123456",
@@ -1125,9 +1128,10 @@ def test_doctor_text_marks_healthy_instance_ok(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(
         bn.cli,
         "_send_request_to_instance",
-        lambda instance, op, params=None, target=None: {
+        lambda instance, op, **kwargs: {
             "ok": True,
             "result": {
+                "status": "ok",
                 "plugin_name": "bn_agent_bridge",
                 "plugin_version": bn.cli.VERSION,
                 "plugin_build_id": "newbuild123456",
@@ -1169,22 +1173,24 @@ def test_doctor_reports_codex_sandbox_socket_denial(monkeypatch, tmp_path, capsy
     monkeypatch.setattr(bn.cli, "list_instances", lambda: [fake_instance])
     monkeypatch.setattr(bn.cli, "plugin_install_dir", lambda: install_dir)
     monkeypatch.setattr(bn.cli, "plugin_source_dir", lambda: source_dir)
-    monkeypatch.setattr(
-        bn.cli,
-        "_send_request_to_instance",
-        lambda instance, op, params=None, target=None: (_ for _ in ()).throw(
-            bn.cli.BridgeError("Failed to contact bridge: [Errno 1] Operation not permitted")
-        ),
-    )
+    def deny_socket(*args, **kwargs):
+        raise PermissionError(1, "Operation not permitted")
 
-    rc = bn.cli.main(["doctor", "--format", "json"])
-
-    assert rc == 0
-    payload = json.loads(capsys.readouterr().out)
-    hint = payload["instances"][0]["sandbox_hint"]
-    assert "Codex sandbox blocked" in hint
-    assert 'prefix_rule(pattern=["bn"], decision="allow")' in hint
-    assert "~/.codex/rules/default.rules" in hint
+    monkeypatch.setattr(bn.transport.socket, "socket", deny_socket)
+    monkeypatch.setattr(bn.transport, "choose_instance", lambda: fake_instance)
+    for command in (["doctor"], ["target", "list"]):
+        assert bn.cli.main([*command, "--format", "json"]) == 2
+        captured = capsys.readouterr()
+        if command == ["doctor"]:
+            payload = json.loads(captured.out)
+            error = payload["instances"][0]["doctor"]
+            assert payload["status"] == "denied"
+            message = error["error"]
+        else:
+            error = json.loads(captured.err)["error"]
+            message = error["message"]
+        assert error["code"] == "bridge_denied"
+        assert "Retry this authorized bn command" in message
 
 
 def test_symbol_rename_text_format_renders_mutation_summary(monkeypatch, capsys):
@@ -1395,3 +1401,42 @@ def test_argument_error_identifies_selected_command_and_recovery(capsys):
     error = capsys.readouterr().err
     assert "usage: bn function list" in error
     assert "bn function search" in error
+
+
+def test_doctor_absence_and_busy_have_nonzero_status(monkeypatch, capsys):
+    monkeypatch.setattr(bn.cli, "list_instances", lambda: [])
+    assert bn.cli.main(["doctor", "--format", "json"]) == 2
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "absent" and report["error"]["code"] == "bridge_absent"
+
+    instance = types.SimpleNamespace(pid=123, socket_path="/tmp/test", plugin_version=bn.cli.VERSION, started_at=None)
+    monkeypatch.setattr(bn.cli, "list_instances", lambda: [instance])
+    def busy(_instance, op, *, timeout, **kwargs):
+        assert op == "doctor" and 0 < timeout <= 2
+        return {"result": {"status": "busy", "active_request": {"operation": "py_exec", "elapsed_seconds": 12.5}}}
+    monkeypatch.setattr(bn.cli, "_send_request_to_instance", busy)
+    assert bn.cli.main(["doctor"]) == 2
+    report = capsys.readouterr().out
+    assert "status=busy" in report and "py_exec (12.5s)" in report
+
+
+def test_token_deprecation_preserves_artifact_and_json_stdout(tmp_path, monkeypatch, capsys):
+    import bn.output
+    monkeypatch.setattr(bn.output, "_token_encoding", lambda: types.SimpleNamespace(encode=lambda *a, **kw: [1, 2]))
+    path = tmp_path / "schema.json"
+    assert bn.cli.main(["schema", "py", "--tokens", "--out", str(path)]) == 0
+    captured = capsys.readouterr()
+    assert "deprecated" in captured.err
+    envelope = json.loads(captured.out)
+    assert envelope["tokens"] == 2 and envelope["sha256"]
+    assert json.loads(path.read_text())["common_arguments"]["tokens"]["deprecated"] is True
+
+
+def test_bundle_partial_section_failure_keeps_artifact_and_exits_nonzero(tmp_path, monkeypatch, capsys):
+    result = {"success": False, "function": {"name": "missing_il"}, "disassembly": "ret",
+              "section_errors": {"decompile": {"code": "il_unavailable", "message": "HLIL unavailable"}}}
+    monkeypatch.setattr(bn.cli, "send_request", lambda *a, **kw: {"result": result})
+    path = tmp_path / "bundle.json"
+    assert bn.cli.main(["bundle", "function", "missing_il", "--out", str(path)]) == 1
+    assert json.loads(capsys.readouterr().out)["artifact_path"] == str(path)
+    assert json.loads(path.read_text()) == result

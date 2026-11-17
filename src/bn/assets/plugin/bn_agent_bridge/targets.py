@@ -3,8 +3,7 @@ from __future__ import annotations
 import os
 import threading
 import traceback
-import weakref
-from dataclasses import dataclass
+from collections import Counter
 from typing import Any
 
 import binaryninja as bn
@@ -111,29 +110,9 @@ def _collect_open_views() -> list[Any]:
             for tab in tabs:
                 collect_from_tab(context, tab)
 
-        unique: list[Any] = []
-        seen: set[int] = set()
-        for bv in found:
-            marker = id(bv)
-            if marker not in seen:
-                seen.add(marker)
-                unique.append(bv)
-        return unique
+        return list(dict.fromkeys(found))
 
     return _run_on_main_thread(collect)
-
-
-@dataclass(slots=True)
-class TargetRecord:
-    view_id: str
-    ref: weakref.ReferenceType
-    session_id: str
-    filename: str
-    basename: str
-    view_name: str
-
-    def target_id(self) -> str:
-        return f"{os.getpid()}:{self.view_id}:{self.session_id}"
 
 
 def _render_target_choices(targets: list[dict[str, Any]]) -> str:
@@ -145,6 +124,8 @@ def _render_target_choices(targets: list[dict[str, Any]]) -> str:
         target_id = target.get("target_id")
         if target_id:
             label += f" (target_id: {target_id})"
+        if target.get("filename"):
+            label += f"  {target['filename']}"
         lines.append(f"- {label}")
     return "\n".join(lines)
 
@@ -152,8 +133,7 @@ def _render_target_choices(targets: list[dict[str, Any]]) -> str:
 class TargetManager:
     def __init__(self):
         self._lock = threading.RLock()
-        self._records: dict[str, TargetRecord] = {}
-        self._ids_by_object: dict[int, str] = {}
+        self._view_ids: dict[tuple[str, int], int] = {}
         self._next_id = 1
 
     def _view_name(self, bv) -> str:
@@ -166,131 +146,98 @@ class TargetManager:
                 continue
         return type(bv).__name__
 
-    def _preferred_selector(self, record: TargetRecord, basename_counts: dict[str, int]) -> str:
-        if record.basename and basename_counts.get(record.basename, 0) == 1:
-            return record.basename
-        return record.target_id()
-
-    def _matches_record(self, record: TargetRecord, selector: str | None) -> bool:
-        if selector is None:
-            return False
-        candidate = str(selector).strip()
-        if candidate in ("", "active"):
-            return False
-        return candidate in (
-            record.target_id(),
-            record.view_id,
-            record.filename,
-            record.basename,
-        )
-
-    def _default_view(self):
-        active = _active_binary_view()
-        if active is not None:
-            return active
-
+    def _snapshot(self) -> list[tuple[Any, dict[str, Any]]]:
+        views, focused = _run_on_main_thread(lambda: (_collect_open_views(), _active_binary_view()))
+        snapshot = []
+        alias_counts: Counter[str] = Counter()
         with self._lock:
-            live_views = [record.ref() for record in self._records.values()]
-        live_views = [view for view in live_views if view is not None]
-        if len(live_views) == 1:
-            return live_views[0]
-        return None
-
-    def refresh(self) -> list[dict[str, Any]]:
-        views = _collect_open_views()
-        focused = _active_binary_view()
-
-        with self._lock:
-            alive: dict[str, TargetRecord] = {}
+            live_ids = {}
             for bv in views:
-                key = id(bv)
-                view_id = self._ids_by_object.get(key)
-                if view_id is None:
-                    view_id = str(self._next_id)
-                    self._next_id += 1
-                    self._ids_by_object[key] = view_id
-
+                # BinaryView hashes its native handle. Qt can return fresh wrappers for one view.
+                handle_hash = hash(bv)
                 try:
                     session_id = str(bv.file.session_id)
                 except Exception:
-                    session_id = str(key)
+                    session_id = str(handle_hash)
+                key = (session_id, handle_hash)
+                view_id = self._view_ids.get(key)
+                if view_id is None:
+                    view_id = self._next_id
+                    self._next_id += 1
+                live_ids[key] = view_id
                 try:
-                    filename = str(getattr(bv.file, "filename", "")) if bv.file else ""
+                    filename = str(bv.file.filename or "")
                 except Exception:
                     filename = ""
+                target_id = f"{os.getpid()}:{view_id}:{session_id}"
+                basename = os.path.basename(filename)
+                alias_counts.update({basename, filename, str(view_id), target_id})
+                info = {
+                    "target_id": target_id,
+                    "view_id": str(view_id),
+                    "session_id": session_id,
+                    "filename": filename,
+                    "basename": basename,
+                    "view_name": self._view_name(bv),
+                    "active": bv == focused or (focused is None and len(views) == 1),
+                }
+                snapshot.append((bv, info))
+            self._view_ids = live_ids
 
-                alive[view_id] = TargetRecord(
-                    view_id=view_id,
-                    ref=weakref.ref(bv),
-                    session_id=session_id,
-                    filename=filename,
-                    basename=os.path.basename(filename) if filename else "",
-                    view_name=self._view_name(bv),
-                )
+        for _, info in snapshot:
+            basename = info["basename"]
+            info["selector"] = info["target_id"]
+            if basename.strip() and basename == basename.strip() and basename != "active" and alias_counts[basename] == 1:
+                info["selector"] = basename
+        return sorted(snapshot, key=lambda pair: int(pair[1]["view_id"]))
 
-            self._records = alive
-            active = focused
-            if active is None and len(self._records) == 1:
-                active = next(iter(self._records.values())).ref()
-            basename_counts: dict[str, int] = {}
-            for record in self._records.values():
-                if record.basename:
-                    basename_counts[record.basename] = basename_counts.get(record.basename, 0) + 1
+    def refresh(self) -> list[dict[str, Any]]:
+        return [info for _, info in self._snapshot()]
 
-            result = []
-            for view_id in sorted(self._records, key=lambda item: int(item)):
-                record = self._records[view_id]
-                view = record.ref()
-                if view is None:
-                    continue
-                result.append(
-                    {
-                        "target_id": record.target_id(),
-                        "view_id": record.view_id,
-                        "session_id": record.session_id,
-                        "filename": record.filename,
-                        "basename": record.basename,
-                        "selector": self._preferred_selector(record, basename_counts),
-                        "view_name": record.view_name,
-                        "active": bool(view is active),
-                    }
-                )
-            return result
-
-    def resolve(self, selector: str | None):
-        targets = self.refresh()
+    def resolve_with_info(self, selector: str | None) -> tuple[Any, dict[str, Any]]:
+        snapshot = self._snapshot()
+        targets = [info for _, info in snapshot]
         if not targets:
             raise OperationFailure("no_targets", "No BinaryView targets are open in the GUI")
-
         if selector in (None, ""):
-            if len(targets) != 1:
-                raise OperationFailure(
-                    "target_required",
-                    f"This command requires --target when multiple targets are open.\nOpen targets:\n{_render_target_choices(targets)}",
-                    observed={"targets": targets},
-                )
-            selector = str(targets[0]["target_id"])
-
+            if len(snapshot) == 1:
+                return snapshot[0]
+            raise OperationFailure(
+                "target_required",
+                f"This command requires --target when multiple targets are open.\nOpen targets:\n{_render_target_choices(targets)}",
+                observed={"targets": targets},
+            )
+        selector = selector.strip()
         if selector == "active":
-            active = self._default_view()
-            if active is None:
-                raise OperationFailure(
-                    "target_required",
-                    f"No active BinaryView is selected; pass an explicit --target.\nOpen targets:\n{_render_target_choices(targets)}",
-                    requested={"target": "active"},
-                    observed={"targets": targets},
-                )
-            return active
-
-        with self._lock:
-            for record in self._records.values():
-                if self._matches_record(record, selector):
-                    view = record.ref()
-                    if view is not None:
-                        return view
+            for bv, info in snapshot:
+                if info["active"]:
+                    return bv, info
+            raise OperationFailure(
+                "target_required",
+                f"No active BinaryView is selected; pass an explicit --target.\nOpen targets:\n{_render_target_choices(targets)}",
+                requested={"target": selector}, observed={"targets": targets},
+            )
+        matches = []
+        for bv, info in snapshot:
+            if selector == info["target_id"]:
+                return bv, info
+            if selector and selector in (info["view_id"], info["filename"], info["basename"]):
+                matches.append((bv, info))
+        if len(matches) == 1:
+            return matches[0]
+        if matches:
+            choices = [info for _, info in matches]
+            raise OperationFailure(
+                "ambiguous_target",
+                f"Ambiguous target selector {selector!r}. Use a full target ID:\n{_render_target_choices(choices)}",
+                requested={"target": selector}, observed={"targets": choices},
+            )
         raise OperationFailure(
             "unknown_target",
             f"Unknown target selector: {selector}\nOpen targets:\n{_render_target_choices(targets)}",
-            requested={"target": selector},
-            observed={"targets": targets},
+            requested={"target": selector}, observed={"targets": targets},
         )
+
+    def resolve(self, selector: str | None):
+        bv, _ = self.resolve_with_info(selector)
+        return bv

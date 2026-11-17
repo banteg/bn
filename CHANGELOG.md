@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-31
+
+- Ambiguous target selectors fail before reads and writes with the matching file paths and IDs. The default target list shows one row per view.
+- Missing, empty and unrenderable IL produce distinct errors. Partial bundles preserve successful sections and exit nonzero.
+- Bundles resolve the view once and default to decompilation and disassembly. Use `--include decompile,disasm,refs` to retain the previous default.
+- Bridge diagnostics distinguish socket denial, absence, timeouts and occupancy. During analysis, `doctor` reports the active operation and elapsed time. Python exceptions include bounded captured stdout in text mode.
+- Deprecated `--tokens` and the `bn-cli[tokens]` extra. Both remain available in 0.16.
+- The companion and CLI now require protocol 3. Reload the companion after upgrading.
+
 ## [0.15.0] - 2026-09-04
 
 ### Changed
@@ -232,7 +241,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 - Simplified bridge discovery, trusted registered bridge sockets, resolved active targets consistently, and removed legacy debug paths.
 
-[Unreleased]: https://github.com/banteg/bn/compare/v0.14.1...HEAD
+[Unreleased]: https://github.com/banteg/bn/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/banteg/bn/compare/v0.15.0...v0.16.0
+[0.15.0]: https://github.com/banteg/bn/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/banteg/bn/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/banteg/bn/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/banteg/bn/compare/v0.13.0...v0.13.1

@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import json
+import os
 import socket
 import time
 import uuid
@@ -24,7 +25,7 @@ class BridgeError(RuntimeError):
     ) -> None:
         super().__init__(message)
         self.code = code
-        self.details = details or {}
+        self.details = details or ({"code": code, "message": message} if code else {})
 
 
 TRANSIENT_SOCKET_ERRNOS = {
@@ -65,24 +66,30 @@ def _socket_probe_error(socket_path: Path, timeout: float = 0.2) -> OSError | No
         return exc
 
 
+def _denied_error(path: Path, exc: OSError) -> BridgeError:
+    if os.environ.get("CODEX_SANDBOX"):
+        hint = "Retry this authorized bn command with bridge socket access outside the Codex sandbox."
+    else:
+        hint = "Check the permissions on the Binary Ninja bridge socket and its registry."
+    return BridgeError(f"Access denied to the Binary Ninja bridge at {path}: {exc}. {hint}", code="bridge_denied")
+
+
 def _load_instance(path: Path) -> BridgeInstance | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         socket_path = Path(payload["socket_path"])
         pid = int(payload["pid"])
-    except (OSError, ValueError, KeyError, json.JSONDecodeError):
-        return None
-
-    if not socket_path.exists():
-        _purge_stale_registry(path)
+    except PermissionError as exc:
+        raise _denied_error(path, exc) from exc
+    except (OSError, ValueError, KeyError):
         return None
 
     probe_error = _socket_probe_error(socket_path)
-    if probe_error is not None and probe_error.errno in DENIED_SOCKET_ERRNOS:
+    if probe_error is not None:
+        if probe_error.errno in TRANSIENT_SOCKET_ERRNOS:
+            _purge_stale_registry(path)
+            return None
         payload["socket_probe_error"] = str(probe_error)
-    elif probe_error is not None:
-        _purge_stale_registry(path)
-        return None
 
     protocol_value = payload.get("protocol_version")
     try:
@@ -104,9 +111,6 @@ def _load_instance(path: Path) -> BridgeInstance | None:
 
 def list_instances() -> list[BridgeInstance]:
     fixed_registry = bridge_registry_path()
-    if not fixed_registry.exists():
-        return []
-
     instances: list[BridgeInstance] = []
     instance = _load_instance(fixed_registry)
     if instance is not None:
@@ -114,10 +118,17 @@ def list_instances() -> list[BridgeInstance]:
     return instances
 
 
+def absent_bridge_error() -> BridgeError:
+    return BridgeError(
+        "No running Binary Ninja bridge instances found. Open a database and start the companion in Binary Ninja.",
+        code="bridge_absent",
+    )
+
+
 def choose_instance() -> BridgeInstance:
     instances = list_instances()
     if not instances:
-        raise BridgeError("No running Binary Ninja bridge instances found")
+        raise absent_bridge_error()
     return instances[0]
 
 
@@ -142,38 +153,51 @@ def _send_request_to_instance(
     encoded = (json.dumps(payload) + "\n").encode("utf-8")
 
     chunks: list[bytes] = []
-    last_error: OSError | None = None
+    deadline = time.monotonic() + timeout if timeout is not None else None
+    connected = False
+
+    def set_remaining_timeout(sock):
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("bridge request deadline expired")
+            sock.settimeout(remaining)
+
     for attempt in range(connect_retries):
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-                if timeout is not None:
-                    sock.settimeout(timeout)
+                set_remaining_timeout(sock)
                 sock.connect(str(instance.socket_path))
+                connected = True
+                set_remaining_timeout(sock)
                 sock.sendall(encoded)
                 with contextlib.suppress(OSError):
                     sock.shutdown(socket.SHUT_WR)
                 while True:
+                    set_remaining_timeout(sock)
                     chunk = sock.recv(65536)
                     if not chunk:
                         break
                     chunks.append(chunk)
             break
-        except OSError as exc:
-            last_error = exc
-            if exc.errno not in TRANSIENT_SOCKET_ERRNOS or attempt == connect_retries - 1:
-                break
-            time.sleep(0.05 * (attempt + 1))
-
-    if last_error is not None and not chunks:
-        if isinstance(last_error, TimeoutError):
-            timeout_suffix = f" after {timeout:.1f}s" if timeout is not None else ""
+        except TimeoutError as exc:
+            state = "Execution may still be in progress." if connected else "The request was not sent."
             raise BridgeError(
-                f"Timed out waiting for Binary Ninja bridge pid {instance.pid} at {instance.socket_path}"
-                f"{timeout_suffix}"
-            ) from last_error
-        raise BridgeError(
-            f"Failed to contact Binary Ninja bridge pid {instance.pid} at {instance.socket_path}: {last_error}"
-        ) from last_error
+                f"Timed out waiting for Binary Ninja bridge pid {instance.pid} at {instance.socket_path}. {state}",
+                code="bridge_timeout",
+            ) from exc
+        except OSError as exc:
+            if exc.errno in DENIED_SOCKET_ERRNOS:
+                raise _denied_error(instance.socket_path, exc) from exc
+            if not connected and exc.errno in TRANSIENT_SOCKET_ERRNOS:
+                if attempt + 1 < connect_retries:
+                    time.sleep(0.05 * (attempt + 1))
+                    continue
+                raise absent_bridge_error() from exc
+            raise BridgeError(
+                f"Failed to contact Binary Ninja bridge pid {instance.pid} at {instance.socket_path}: {exc}",
+                code="bridge_transport_error",
+            ) from exc
 
     if not chunks:
         raise BridgeError("Binary Ninja bridge returned an empty response")
@@ -193,6 +217,11 @@ def _send_request_to_instance(
     if isinstance(error, dict):
         message = str(error.get("message") or error.get("code") or "Unknown Binary Ninja bridge error")
         observed = error.get("observed")
+        if isinstance(observed, dict) and isinstance(observed.get("stdout"), str) and observed["stdout"]:
+            stdout = observed["stdout"]
+            if len(stdout) > 2000:
+                stdout = "… [earlier stdout omitted]\n" + stdout[-2000:]
+            message += "\nCaptured stdout:\n" + stdout.rstrip("\n")
         if isinstance(observed, dict) and observed.get("traceback"):
             message += "\n" + str(observed["traceback"]).rstrip()
         if isinstance(observed, dict) and observed.get("suggestions"):
